@@ -31,7 +31,7 @@ def make_session():
     return s
 
 
-def extract_fields(html):
+def extract_login_fields(html):
     fl = fp = fm = idpge_val = action_url = None
 
     m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html, re.I)
@@ -81,29 +81,23 @@ def login():
     )
 
     r1 = session.post(PLANNING_URL, data={
-        "club": CLUB_ID,
-        "idact": "101",
+        "club": CLUB_ID, "idact": "101",
     }, headers={"Referer": r0.url})
 
     html = r1.text
-    fl, fp, fm, idpge_val, action_url = extract_fields(html)
+    fl, fp, fm, idpge_val, action_url = extract_login_fields(html)
 
     md5 = get_md5(PASSWORD + LOGIN)
     post_url = action_url if (action_url and action_url.startswith("http")) else PLANNING_URL
-    # Normaliser l'URL (/../)
-    post_url = post_url.replace("/_start/../5.11.04/", "/5.11.04/")
+    post_url = post_url.replace("/_start/../5.11.04/", "/5.11.04/").replace("?", "")
 
     payload = {
         "idact": "101",
         "idpge": idpge_val or f"101-{CLUB_ID}",
-        "usermd5": "",
-        "idgfcmiid": "0",
-        "largeur_ecran": "1536",
-        "hauteur_ecran": "864",
-        "pingmax": "401",
-        "pingmin": "18",
-        "userid": "",
-        "userkey": "",
+        "usermd5": "", "idgfcmiid": "0",
+        "largeur_ecran": "1536", "hauteur_ecran": "864",
+        "pingmax": "401", "pingmin": "18",
+        "userid": "", "userkey": "",
     }
     if fl: payload[fl] = LOGIN
     if fp: payload[fp] = ""
@@ -119,30 +113,24 @@ def login():
 
 
 def format_date_fr(date_str):
-    """Convertit JJ/MM/AAAA en 'JJ/MM/AAAA Jour'."""
     try:
         dt = datetime.strptime(date_str, "%d/%m/%Y")
-        jour = JOURS_FR[dt.weekday()]
-        return f"{date_str} {jour}"
+        return f"{date_str} {JOURS_FR[dt.weekday()]}"
     except:
         return date_str
 
 
 def get_planning(session, date_str):
+    # Extraire idpge depuis la page de login si disponible
     date_fr = format_date_fr(date_str)
     payload = {
         "idact": "336",
         "idpge": "210-00000000000000",
         "IDOBJ": "10_0_2",
-        "idses": "S0",
-        "idcrt": "2",
-        "idpro": "",
-        "idpar": "",
-        "pw": "14",
-        "dj": "2",
-        "userid": "",
-        "usermd5": "",
-        "club": "",
+        "idses": "S0", "idcrt": "2",
+        "idpro": "", "idpar": "",
+        "pw": "14", "dj": "2",
+        "userid": "", "usermd5": "", "club": "",
         "B_MOJJO": "0",
         "LISTE_RESA_BOURSE_DATE_JEU": "",
         "LISTE_RESA_BOURSE_HEURE_JEU": "",
@@ -156,24 +144,81 @@ def get_planning(session, date_str):
 
 
 def parse_slots(html):
-    soup = BeautifulSoup(html, "lxml")
+    """
+    Les créneaux libres ont onclick avec idact=330 et IDOBJ=10_0_2_8h_1 etc.
+    Format onclick: document.forms[0].idact.value='330';
+                    document.forms[0].IDOBJ.value='10_0_2_8h_1';
+                    document.forms[0].idcrt.value='1';
+                    document.forms[0].pw.value='14';
+    """
     slots = []
+    # Chercher tous les éléments avec onclick contenant idact='330'
+    pattern = re.compile(r"onclick=\"[^\"]*idact\.value='330'[^\"]*\"", re.I)
+    
+    soup = BeautifulSoup(html, "lxml")
     for tag in soup.find_all(onclick=True):
         onclick = tag.get("onclick", "")
-        if "330" in onclick:
-            label = tag.get_text(strip=True)
-            m = re.search(r"idpge['\"]?\s*[:=]\s*['\"]?([^'\"&,\s;]+)", onclick)
-            slots.append({"label": label, "idpge": m.group(1) if m else "", "onclick_raw": onclick[:300]})
+        if "idact.value='330'" in onclick or 'idact.value="330"' in onclick:
+            # Extraire IDOBJ (contient court + heure)
+            idobj_m = re.search(r"IDOBJ\.value='([^']+)'", onclick)
+            idcrt_m = re.search(r"idcrt\.value='([^']+)'", onclick)
+            pw_m = re.search(r"pw\.value='([^']+)'", onclick)
+            
+            idobj = idobj_m.group(1) if idobj_m else ""
+            idcrt = idcrt_m.group(1) if idcrt_m else ""
+            pw = pw_m.group(1) if pw_m else ""
+            
+            # Parser IDOBJ : format 10_0_2_8h_1 (site_?_court_heure_?)
+            parts = idobj.split("_") if idobj else []
+            heure = parts[3] if len(parts) > 3 else ""
+            court = parts[2] if len(parts) > 2 else ""
+            
+            label = tag.get_text(strip=True) or heure
+            
+            slots.append({
+                "label": f"Court {court} - {heure}" if court and heure else label,
+                "heure": heure,
+                "court": court,
+                "idobj": idobj,
+                "idcrt": idcrt,
+                "pw": pw,
+            })
     return slots
 
 
-def validate_reservation(session, idpge):
+def reserve_slot(session, idobj, idcrt, pw, planning_idpge):
+    """Clique sur un créneau libre pour ouvrir la fiche de réservation."""
+    payload = {
+        "idact": "330",
+        "idpge": planning_idpge,
+        "IDOBJ": idobj,
+        "idcrt": idcrt,
+        "pw": pw,
+        "idses": "S0", "dj": "2",
+        "B_MOJJO": "0",
+        "CHAMP_SELECTEUR_JEU": "1",
+        "ID_TABLEAU": f"1|{CLUB_ID}|1",
+    }
+    return session.post(PLANNING_URL, data=payload)
+
+
+def select_partner_and_validate(session, fiche_html):
+    """Depuis la fiche de réservation, sélectionne Aurelien et valide."""
+    # Extraire idpge de la fiche
+    m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', fiche_html)
+    if not m:
+        m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', fiche_html)
+    idpge = m.group(1) if m else ""
+
+    # Étape 1 : sélectionner Aurelien LANGE (value=-100 -> IDOBJ=100)
     session.post(PLANNING_URL, data={
         "idact": "332", "idpge": idpge,
         "IDOBJ": "100", "idpar": "100",
         "CHAMP_TYPE_1": PARTNER_VALUE,
         "idses": "S0", "b_i": "0",
     })
+
+    # Étape 2 : valider
     return session.post(PLANNING_URL, data={
         "idact": "366", "idpge": idpge,
         "idses": "S0", "b_i": "0",
@@ -198,15 +243,26 @@ def debug_login():
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "19/03/2026")
-    session, _, connected = login()
-    resp = get_planning(session, date_str)
-    slots = parse_slots(resp.text)
+    session, login_resp, connected = login()
+
+    # D'abord essayer depuis la réponse du login (planning du jour)
+    slots = parse_slots(login_resp.text)
+
+    # Si pas de slots ou date différente, appeler get_planning
+    today = datetime.now().strftime("%d/%m/%Y")
+    if not slots or date_str != today:
+        resp = get_planning(session, date_str)
+        slots = parse_slots(resp.text)
+        planning_html = resp.text
+    else:
+        planning_html = login_resp.text
+
     return jsonify({
         "connected": connected,
-        "planning_length": len(resp.text),
+        "planning_length": len(planning_html),
         "slots_found": len(slots),
         "slots": slots[:10],
-        "planning_html": resp.text[:5000],
+        "planning_html": planning_html[:3000],
     })
 
 
@@ -215,21 +271,41 @@ def creneaux():
     date_str = request.args.get("date")
     if not date_str:
         return jsonify({"error": "Parametre 'date' manquant"}), 400
-    session, _, _ = login()
-    resp = get_planning(session, date_str)
-    slots = parse_slots(resp.text)
+
+    session, login_resp, _ = login()
+    today = datetime.now().strftime("%d/%m/%Y")
+
+    if date_str == today:
+        slots = parse_slots(login_resp.text)
+    else:
+        resp = get_planning(session, date_str)
+        slots = parse_slots(resp.text)
+
     return jsonify({"date": date_str, "creneaux": slots})
 
 
 @app.route("/reserver", methods=["POST"])
 def reserver():
     data = request.json
-    idpge = data.get("idpge")
-    if not idpge:
-        return jsonify({"error": "idpge manquant"}), 400
-    session, _, _ = login()
-    resp = validate_reservation(session, idpge)
-    soup = BeautifulSoup(resp.text, "lxml")
+    idobj = data.get("idobj")
+    idcrt = data.get("idcrt", "2")
+    pw = data.get("pw", "14")
+    if not idobj:
+        return jsonify({"error": "idobj manquant"}), 400
+
+    session, login_resp, _ = login()
+
+    # Extraire idpge du planning
+    m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', login_resp.text)
+    planning_idpge = m.group(1) if m else "210-00000000000000"
+
+    # Ouvrir la fiche de réservation
+    fiche_resp = reserve_slot(session, idobj, idcrt, pw, planning_idpge)
+
+    # Sélectionner partenaire et valider
+    confirm_resp = select_partner_and_validate(session, fiche_resp.text)
+
+    soup = BeautifulSoup(confirm_resp.text, "lxml")
     erreur = soup.find(class_="erreur")
     if erreur and erreur.get_text(strip=True):
         return jsonify({"error": erreur.get_text(strip=True)})
@@ -239,21 +315,3 @@ def reserver():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-# Route temporaire pour voir le HTML après login
-@app.route("/debug-after-login")
-def debug_after_login():
-    session, resp, connected = login()
-    # Chercher idpge=210 dans le HTML
-    html = resp.text
-    m = re.search(r'idpge["\s]+value=["\']?(210-\d+)', html)
-    idpge_210 = m.group(1) if m else "not found"
-    # Chercher tous les idpge
-    all_idpge = re.findall(r'idpge[^"\']*["\']([^"\']+)["\']', html)
-    return jsonify({
-        "connected": connected,
-        "idpge_210": idpge_210,
-        "all_idpge": all_idpge[:10],
-        "html_snippet": html[html.find("210"):html.find("210")+200] if "210" in html else "not found",
-        "html_preview": html[:3000],
-    })
