@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 BASE_URL = "https://www.premier-service.fr/5.11.04/ics.php"
+MOBILE_URL = "https://www.premier-service.fr/5.11.04/ics.php"
 CLUB_ID = "32920393"
 
 LOGIN = os.environ.get("TENNIS_LOGIN", "JECHAP")
@@ -21,11 +22,21 @@ def get_md5(s):
 def login():
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.premier-service.fr",
+        "Referer": "https://www.adsltennis.fr/_start/index.php?club=32920393&idact=101",
     })
-    session.get(BASE_URL)
+
+    # Charger la page de login pour obtenir un cookie de session valide
+    init_resp = session.get(
+        "https://www.adsltennis.fr/_start/index.php",
+        params={"club": CLUB_ID, "idact": "101"}
+    )
+
+    # Le MD5 est calculé comme : MD5((PASSWORD + LOGIN).toUpperCase())
     md5 = get_md5(PASSWORD + LOGIN)
+
     payload = {
         "idact": "101",
         "idpge": f"101-{CLUB_ID}",
@@ -41,12 +52,17 @@ def login():
         "rpaaeddpyyiuhs": LOGIN,
         "ryusakurjstoeenf": "",
     }
+
     resp = session.post(BASE_URL, data=payload)
     return session, resp
 
 
 def get_planning(session, date_str):
-    payload = {"idact": "345", "ladate": date_str, "idses": "S0"}
+    payload = {
+        "idact": "345",
+        "ladate": date_str,
+        "idses": "S0",
+    }
     resp = session.post(BASE_URL, data=payload)
     return resp
 
@@ -61,21 +77,30 @@ def parse_slots(html):
             label = tag.get_text(strip=True)
             idpge_match = re.search(r"idpge['\"]?\s*[:=]\s*['\"]?([^'\"&,\s;]+)", onclick)
             idpge = idpge_match.group(1) if idpge_match else ""
-            slots.append({"label": label, "idpge": idpge, "onclick_raw": onclick[:300]})
+            slots.append({
+                "label": label,
+                "idpge": idpge,
+                "onclick_raw": onclick[:300]
+            })
     return slots
 
 
 def validate_reservation(session, idpge):
     payload_partner = {
-        "idact": "332", "idpge": idpge,
-        "IDOBJ": "100", "idpar": "100",
+        "idact": "332",
+        "idpge": idpge,
+        "IDOBJ": "100",
+        "idpar": "100",
         "CHAMP_TYPE_1": PARTNER_VALUE,
-        "idses": "S0", "b_i": "0",
+        "idses": "S0",
+        "b_i": "0",
     }
     session.post(BASE_URL, data=payload_partner)
     payload_validate = {
-        "idact": "366", "idpge": idpge,
-        "idses": "S0", "b_i": "0",
+        "idact": "366",
+        "idpge": idpge,
+        "idses": "S0",
+        "b_i": "0",
     }
     return session.post(BASE_URL, data=payload_validate)
 
@@ -90,20 +115,23 @@ def debug_login():
     session, resp = login()
     return jsonify({
         "status_code": resp.status_code,
-        "html_preview": resp.text[:3000],
+        "url_finale": resp.url,
         "cookies": dict(session.cookies),
+        "html_preview": resp.text[:3000],
     })
 
 
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "20/03/2026")
-    session, _ = login()
+    session, login_resp = login()
     resp = get_planning(session, date_str)
     return jsonify({
-        "status_code": resp.status_code,
-        "html_length": len(resp.text),
-        "html": resp.text[:8000],
+        "login_url": login_resp.url,
+        "login_preview": login_resp.text[:500],
+        "planning_status": resp.status_code,
+        "planning_length": len(resp.text),
+        "planning_html": resp.text[:8000],
     })
 
 
@@ -115,7 +143,11 @@ def creneaux():
     session, _ = login()
     resp = get_planning(session, date_str)
     slots = parse_slots(resp.text)
-    return jsonify({"date": date_str, "creneaux": slots, "html_length": len(resp.text)})
+    return jsonify({
+        "date": date_str,
+        "creneaux": slots,
+        "html_length": len(resp.text)
+    })
 
 
 @app.route("/reserver", methods=["POST"])
