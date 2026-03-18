@@ -21,7 +21,7 @@ COURT_NAMES = {
 
 def do_login(page):
     page.goto(PLANNING_URL)
-    page.wait_for_selector("input[type='text']:visible", timeout=10000)
+    page.wait_for_selector("input[type='text']:visible", timeout=20000)
     inputs_text = page.query_selector_all("input[type='text']:visible")
     inputs_pwd = page.query_selector_all("input[type='password']:visible")
     if inputs_text:
@@ -34,7 +34,7 @@ def do_login(page):
         if "entrer" in txt or "valider" in txt:
             btn.click()
             break
-    page.wait_for_selector("p.prc_visible", timeout=15000)
+    page.wait_for_selector("p.prc_visible", timeout=30000)
 
 
 def navigate_to_date(page, date_str):
@@ -51,11 +51,11 @@ def navigate_to_date(page, date_str):
             btn = page.query_selector("span:has-text('<<')")
         if btn:
             btn.click()
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(3000)
 
 
 def get_slots(page):
-    page.wait_for_selector("p.prc_visible", timeout=10000)
+    page.wait_for_selector("p.prc_visible", timeout=20000)
     elements = page.query_selector_all("p.prc_visible[ondblclick]")
     slots = []
     seen = set()
@@ -91,20 +91,20 @@ def reserve_slot(page, slot_id):
     if not el:
         return False, f"Créneau {slot_id} introuvable"
     el.dblclick()
-    page.wait_for_selector("select:visible", timeout=10000)
+    page.wait_for_selector("select:visible", timeout=20000)
     selects = page.query_selector_all("select:visible")
     for sel in selects:
         options = sel.query_selector_all("option")
         for opt in options:
             if PARTNER_NAME.lower() in opt.inner_text().lower():
                 opt.click()
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(3000)
                 break
     btns = page.query_selector_all("button:visible")
     for btn in btns:
         if "valider" in btn.inner_text().lower():
             btn.click()
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
             break
     body = page.query_selector("body")
     text = body.inner_text() if body else ""
