@@ -137,11 +137,12 @@ def parse_slots(html):
 
     for p in soup.find_all("p"):
         pid = p.get("id", "")
-        style = p.get("style", "")
+        classes = " ".join(p.get("class", []))
         ondblclick = p.get("ondblclick", "")
 
-        # Vérifier que c'est un créneau libre
-        if "--resa-libre" not in style:
+        # Vérifier que c'est un créneau libre :
+        # classe prc_visible ET ondblclick contenant idg_take
+        if "prc_visible" not in classes:
             continue
         if "idg_take" not in ondblclick:
             continue
@@ -253,11 +254,12 @@ def debug_planning():
     soup = BeautifulSoup(html, "lxml")
     libre_samples = []
     for p in soup.find_all("p"):
-        if "--resa-libre" in p.get("style", ""):
+        if "prc_visible" in " ".join(p.get("class", [])) and "idg_take" in p.get("ondblclick",""):
             libre_samples.append({
                 "id": p.get("id",""),
                 "ondblclick": p.get("ondblclick","")[:100],
                 "classes": p.get("class",[]),
+                "style": p.get("style","")[:100],
             })
             if len(libre_samples) >= 5:
                 break
