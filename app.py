@@ -240,6 +240,34 @@ def debug_login():
     })
 
 
+@app.route("/debug-search")
+def debug_search():
+    date_str = request.args.get("date", "20/03/2026")
+    term = request.args.get("term", "330")
+    session, login_resp, connected = login()
+    today = datetime.now().strftime("%d/%m/%Y")
+    if date_str == today:
+        html = login_resp.text
+    else:
+        resp = get_planning(session, date_str)
+        html = resp.text
+    # Chercher toutes les occurrences du terme
+    snippets = []
+    idx = 0
+    while True:
+        pos = html.find(term, idx)
+        if pos == -1 or len(snippets) >= 5:
+            break
+        snippets.append(html[max(0,pos-100):pos+200])
+        idx = pos + 1
+    return jsonify({
+        "html_length": len(html),
+        "term": term,
+        "occurrences": len(re.findall(re.escape(term), html)),
+        "snippets": snippets,
+    })
+
+
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "19/03/2026")
