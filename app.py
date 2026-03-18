@@ -117,42 +117,58 @@ def get_planning(session, login_resp, date_str):
 
 def parse_slots(html):
     """
-    Les créneaux libres sont des <p> avec class prc_visible
-    et style contenant var(--resa-libre).
-    L'id est au format HEURE_?_COURT (ex: 13_0_3 = 13h, court 3)
+    Les créneaux libres ont la classe CSS 'resa_libre' sur les <td>.
+    On extrait leur onclick et leurs attributs pour récupérer IDOBJ, idcrt, pw.
     """
     soup = BeautifulSoup(html, "lxml")
     slots = []
     seen = set()
 
-    for p in soup.find_all("p"):
-        style = p.get("style", "")
-        classes = " ".join(p.get("class", []))
-        pid = p.get("id", "")
+    # Chercher tous les éléments avec classe contenant "libre"
+    for tag in soup.find_all(class_=re.compile(r'libre', re.I)):
+        onclick = tag.get("onclick", "")
+        text = tag.get_text(strip=True)
 
-        if "--resa-libre" not in style:
-            continue
-        if "prc_visible" not in classes:
-            continue
-        if not pid or pid in seen:
-            continue
-        seen.add(pid)
+        # Extraire IDOBJ depuis onclick ou attributs data-*
+        idobj = ""
+        idobj_m = re.search(r"['\"]?IDOBJ['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
+        if not idobj_m:
+            idobj_m = re.search(r"IDOBJ[^'\"]*['\"]([^'\"]+)['\"]", onclick, re.I)
+        if idobj_m:
+            idobj = idobj_m.group(1)
+        if not idobj:
+            idobj = tag.get("data-idobj", "") or tag.get("id", "")
 
-        parts = pid.split("_")
+        if not idobj or idobj in seen:
+            continue
+        seen.add(idobj)
+
+        # Extraire idcrt et pw
+        idcrt_m = re.search(r"['\"]?idcrt['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
+        pw_m = re.search(r"['\"]?pw['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
+        idcrt = idcrt_m.group(1) if idcrt_m else tag.get("data-idcrt", "2")
+        pw = pw_m.group(1) if pw_m else tag.get("data-pw", "24")
+
+        # Décoder IDOBJ pour extraire court et heure
+        parts = idobj.split("_")
+        court_num = parts[2] if len(parts) > 2 else "?"
         heure_num = parts[0] if parts else ""
-        court = parts[2] if len(parts) > 2 else "?"
-        heure = f"{heure_num}h" if heure_num else "?"
-        court_label = COURT_NAMES.get(court, f"Court {court}")
+        heure = f"{heure_num}h" if heure_num.isdigit() else (text if text else "?")
 
         slots.append({
-            "label": f"{court_label} - {heure}",
+            "label": f"Court {court_num} - {heure}",
             "heure": heure,
-            "court": court,
-            "court_label": court_label,
-            "slot_id": pid,
+            "court": court_num,
+            "idobj": idobj,
+            "idcrt": idcrt,
+            "pw": pw,
+            "onclick_raw": onclick[:150],
         })
 
-    slots.sort(key=lambda x: (int(x["slot_id"].split("_")[0]), int(x["court"]) if x["court"].isdigit() else 99))
+    slots.sort(key=lambda x: (
+        int(x["heure"].replace("h","")) if x["heure"].replace("h","").isdigit() else 99,
+        int(x["court"]) if x["court"].isdigit() else 99
+    ))
     return slots
 
 
