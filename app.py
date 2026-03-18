@@ -11,9 +11,8 @@ app = Flask(__name__)
 CLUB_ID = "57920393"
 LOGIN = os.environ.get("TENNIS_LOGIN", "JECHAP")
 PASSWORD = os.environ.get("TENNIS_PASSWORD", "")
-PARTNER_VALUE = "-100"  # Aurelien LANGE
+PARTNER_VALUE = "-100"
 PLANNING_URL = "https://www.premier-service.fr/5.11.04/ics.php"
-
 JOURS_FR = {0:"Lundi",1:"Mardi",2:"Mercredi",3:"Jeudi",4:"Vendredi",5:"Samedi",6:"Dimanche"}
 
 
@@ -33,82 +32,49 @@ def make_session():
 
 def extract_login_fields(html):
     fl = fp = fm = idpge_val = action_url = None
-
     m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html, re.I)
-    if m:
-        action_url = m.group(1)
-
+    if m: action_url = m.group(1)
     for m in re.finditer(r'<input[^>]+type=["\']text["\'][^>]*>', html, re.I):
         nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if nm and nm.group(1) not in ("userid",):
-            fl = nm.group(1)
-            break
-
+        if nm and nm.group(1) not in ("userid",): fl = nm.group(1); break
     for m in re.finditer(r'<input[^>]+type=["\']password["\'][^>]*>', html, re.I):
         nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if nm and nm.group(1) not in ("userkey",):
-            fp = nm.group(1)
-            break
-
-    fixed = {"idact", "usermd5", "idgfcmiid", "largeur_ecran", "hauteur_ecran",
-             "pingmax", "pingmin", "userid", "userkey", "idses", "b_i", "club"}
+        if nm and nm.group(1) not in ("userkey",): fp = nm.group(1); break
+    fixed = {"idact","usermd5","idgfcmiid","largeur_ecran","hauteur_ecran",
+             "pingmax","pingmin","userid","userkey","idses","b_i","club"}
     for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]*>', html, re.I):
         nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if not nm:
-            continue
+        if not nm: continue
         name = nm.group(1)
         vm = re.search(r'value=["\']([^"\']*)["\']', m.group(0))
         val = vm.group(1) if vm else ""
-        if name not in fixed and not val:
-            fm = name
-            break
-
+        if name not in fixed and not val: fm = name; break
     m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', html, re.I)
-    if not m:
-        m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', html, re.I)
-    if m:
-        idpge_val = m.group(1)
-
+    if not m: m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', html, re.I)
+    if m: idpge_val = m.group(1)
     return fl, fp, fm, idpge_val, action_url
 
 
 def login():
     session = make_session()
-
-    r0 = session.get(
-        f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}",
-        allow_redirects=True
-    )
-
-    r1 = session.post(PLANNING_URL, data={
-        "club": CLUB_ID, "idact": "101",
-    }, headers={"Referer": r0.url})
-
+    r0 = session.get(f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}", allow_redirects=True)
+    r1 = session.post(PLANNING_URL, data={"club": CLUB_ID, "idact": "101"}, headers={"Referer": r0.url})
     html = r1.text
     fl, fp, fm, idpge_val, action_url = extract_login_fields(html)
-
     md5 = get_md5(PASSWORD + LOGIN)
-    post_url = action_url if (action_url and action_url.startswith("http")) else PLANNING_URL
-    post_url = post_url.replace("/_start/../5.11.04/", "/5.11.04/").replace("?", "")
-
+    post_url = (action_url or PLANNING_URL).replace("/_start/../5.11.04/", "/5.11.04/").replace("?", "")
     payload = {
-        "idact": "101",
-        "idpge": idpge_val or f"101-{CLUB_ID}",
+        "idact": "101", "idpge": idpge_val or f"101-{CLUB_ID}",
         "usermd5": "", "idgfcmiid": "0",
         "largeur_ecran": "1536", "hauteur_ecran": "864",
-        "pingmax": "401", "pingmin": "18",
-        "userid": "", "userkey": "",
+        "pingmax": "401", "pingmin": "18", "userid": "", "userkey": "",
     }
     if fl: payload[fl] = LOGIN
     if fp: payload[fp] = ""
     if fm: payload[fm] = md5
-
     session.headers["Referer"] = r1.url
     resp = session.post(post_url, data=payload)
-    connected = ("fiche_identification" not in resp.text
-                 and "fiche_erreur" not in resp.text
-                 and len(resp.text) > 5000)
-
+    connected = "fiche_identification" not in resp.text and len(resp.text) > 5000
     return session, resp, connected
 
 
@@ -120,16 +86,30 @@ def format_date_fr(date_str):
         return date_str
 
 
-def get_planning(session, date_str):
-    # Extraire idpge depuis la page de login si disponible
+def get_planning(session, login_resp, date_str):
+    """Navigue vers une date en utilisant idact=336."""
+    # Extraire idpge du planning depuis la réponse du login
+    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d+-\d+)["\']', login_resp.text)
+    if not m:
+        m = re.search(r'value=["\'](\d+-\d+)["\'][^>]+name=["\']idpge["\']', login_resp.text)
+    planning_idpge = m.group(1) if m else f"210-{CLUB_ID}"
+
+    # Extraire IDOBJ courant
+    m2 = re.search(r'name=["\']IDOBJ["\'][^>]*value=["\']([^"\']*)["\']', login_resp.text)
+    idobj = m2.group(1) if m2 else "10_0_2"
+
+    # Extraire idcrt
+    m3 = re.search(r'name=["\']idcrt["\'][^>]*value=["\']([^"\']*)["\']', login_resp.text)
+    idcrt = m3.group(1) if m3 else "2"
+
     date_fr = format_date_fr(date_str)
     payload = {
         "idact": "336",
-        "idpge": "210-00000000000000",
-        "IDOBJ": "10_0_2",
-        "idses": "S0", "idcrt": "2",
+        "idpge": planning_idpge,
+        "IDOBJ": idobj,
+        "idses": "S0", "idcrt": idcrt,
         "idpro": "", "idpar": "",
-        "pw": "14", "dj": "2",
+        "pw": "24", "dj": "2",
         "userid": "", "usermd5": "", "club": "",
         "B_MOJJO": "0",
         "LISTE_RESA_BOURSE_DATE_JEU": "",
@@ -145,83 +125,98 @@ def get_planning(session, date_str):
 
 def parse_slots(html):
     """
-    Les créneaux libres ont onclick avec idact=330 et IDOBJ=10_0_2_8h_1 etc.
-    Format onclick: document.forms[0].idact.value='330';
-                    document.forms[0].IDOBJ.value='10_0_2_8h_1';
-                    document.forms[0].idcrt.value='1';
-                    document.forms[0].pw.value='14';
+    Les créneaux libres sont des <td> avec onclick contenant IDOBJ.value et idact=336.
+    Le clic sur un créneau soumet idact=336 avec l'IDOBJ du créneau.
+    On cherche les cellules dont le texte est une heure (ex: 9h, 10h) 
+    et qui ont un onclick avec IDOBJ.
     """
-    slots = []
-    # Chercher tous les éléments avec onclick contenant idact='330'
-    pattern = re.compile(r"onclick=\"[^\"]*idact\.value='330'[^\"]*\"", re.I)
-    
     soup = BeautifulSoup(html, "lxml")
-    for tag in soup.find_all(onclick=True):
-        onclick = tag.get("onclick", "")
-        if "idact.value='330'" in onclick or 'idact.value="330"' in onclick:
-            # Extraire IDOBJ (contient court + heure)
-            idobj_m = re.search(r"IDOBJ\.value='([^']+)'", onclick)
-            idcrt_m = re.search(r"idcrt\.value='([^']+)'", onclick)
-            pw_m = re.search(r"pw\.value='([^']+)'", onclick)
-            
-            idobj = idobj_m.group(1) if idobj_m else ""
-            idcrt = idcrt_m.group(1) if idcrt_m else ""
-            pw = pw_m.group(1) if pw_m else ""
-            
-            # Parser IDOBJ : format 10_0_2_8h_1 (site_?_court_heure_?)
-            parts = idobj.split("_") if idobj else []
-            heure = parts[3] if len(parts) > 3 else ""
-            court = parts[2] if len(parts) > 2 else ""
-            
-            label = tag.get_text(strip=True) or heure
-            
-            slots.append({
-                "label": f"Court {court} - {heure}" if court and heure else label,
-                "heure": heure,
-                "court": court,
-                "idobj": idobj,
-                "idcrt": idcrt,
-                "pw": pw,
-            })
+    slots = []
+
+    for td in soup.find_all("td"):
+        onclick = td.get("onclick", "")
+        if not onclick:
+            continue
+
+        # Chercher IDOBJ dans onclick
+        idobj_m = re.search(r"IDOBJ\.value='([^']+)'", onclick)
+        if not idobj_m:
+            continue
+
+        idobj = idobj_m.group(1)
+        text = td.get_text(strip=True)
+
+        # Les créneaux libres ont juste une heure comme texte (ex: "9h", "10h", "15h")
+        if not re.match(r'^\d{1,2}h\d*$', text):
+            continue
+
+        # Extraire idcrt
+        idcrt_m = re.search(r"idcrt\.value='([^']+)'", onclick)
+        pw_m = re.search(r"pw\.value='([^']+)'", onclick)
+        idcrt = idcrt_m.group(1) if idcrt_m else "2"
+        pw = pw_m.group(1) if pw_m else "24"
+
+        # Décoder IDOBJ: format site_?_court_heure ou site_?_court
+        parts = idobj.split("_")
+        court_num = parts[2] if len(parts) > 2 else "?"
+
+        slots.append({
+            "label": f"Court {court_num} - {text}",
+            "heure": text,
+            "court": court_num,
+            "idobj": idobj,
+            "idcrt": idcrt,
+            "pw": pw,
+        })
+
     return slots
 
 
-def reserve_slot(session, idobj, idcrt, pw, planning_idpge):
-    """Clique sur un créneau libre pour ouvrir la fiche de réservation."""
+def open_reservation_form(session, login_resp, idobj, idcrt, pw):
+    """Clique sur un créneau libre — soumet idact=336 avec l'IDOBJ du créneau."""
+    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d+-\d+)["\']', login_resp.text)
+    if not m:
+        m = re.search(r'value=["\'](\d+-\d+)["\'][^>]+name=["\']idpge["\']', login_resp.text)
+    planning_idpge = m.group(1) if m else f"210-{CLUB_ID}"
+
+    today = datetime.now().strftime("%d/%m/%Y")
+    date_fr = format_date_fr(today)
+
     payload = {
-        "idact": "330",
+        "idact": "336",
         "idpge": planning_idpge,
         "IDOBJ": idobj,
-        "idcrt": idcrt,
-        "pw": pw,
-        "idses": "S0", "dj": "2",
+        "idses": "S0", "idcrt": idcrt,
+        "idpro": "", "idpar": "",
+        "pw": pw, "dj": "2",
+        "userid": "", "usermd5": "", "club": "",
         "B_MOJJO": "0",
         "CHAMP_SELECTEUR_JEU": "1",
         "ID_TABLEAU": f"1|{CLUB_ID}|1",
+        "CHAMP_SELECTEUR_JOUR": date_fr,
+        "nc": "30",
     }
     return session.post(PLANNING_URL, data=payload)
 
 
-def select_partner_and_validate(session, fiche_html):
-    """Depuis la fiche de réservation, sélectionne Aurelien et valide."""
-    # Extraire idpge de la fiche
+def select_partner_and_validate(session, fiche_resp):
+    """Sélectionne Aurelien LANGE et valide."""
+    fiche_html = fiche_resp.text
     m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', fiche_html)
     if not m:
         m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', fiche_html)
     idpge = m.group(1) if m else ""
 
-    # Étape 1 : sélectionner Aurelien LANGE (value=-100 -> IDOBJ=100)
     session.post(PLANNING_URL, data={
         "idact": "332", "idpge": idpge,
-        "IDOBJ": "100", "idpar": "100",
-        "CHAMP_TYPE_1": PARTNER_VALUE,
-        "idses": "S0", "b_i": "0",
+        "IDOBJ": "100", "IDREF": "", "idtpa": "",
+        "idpar": "100", "rcout": "", "b_i": "0",
+        "idses": "S0", "CHAMP_TYPE_1": PARTNER_VALUE,
     })
-
-    # Étape 2 : valider
     return session.post(PLANNING_URL, data={
         "idact": "366", "idpge": idpge,
-        "idses": "S0", "b_i": "0",
+        "IDOBJ": "", "IDREF": "", "idtpa": "",
+        "idpar": "", "rcout": "", "b_i": "0", "idses": "S0",
     })
 
 
@@ -233,64 +228,28 @@ def health():
 @app.route("/debug-login")
 def debug_login():
     session, resp, connected = login()
-    return jsonify({
-        "connected": connected,
-        "resp_len": len(resp.text),
-        "html_preview": resp.text[:1000],
-    })
+    return jsonify({"connected": connected, "resp_len": len(resp.text), "html_preview": resp.text[:500]})
 
 
-@app.route("/debug-search")
-def debug_search():
-    date_str = request.args.get("date", "20/03/2026")
-    term = request.args.get("term", "330")
+@app.route("/debug-planning")
+def debug_planning():
+    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
     session, login_resp, connected = login()
     today = datetime.now().strftime("%d/%m/%Y")
     if date_str == today:
         html = login_resp.text
     else:
-        resp = get_planning(session, date_str)
+        resp = get_planning(session, login_resp, date_str)
         html = resp.text
-    # Chercher toutes les occurrences du terme
-    snippets = []
-    idx = 0
-    while True:
-        pos = html.find(term, idx)
-        if pos == -1 or len(snippets) >= 5:
-            break
-        snippets.append(html[max(0,pos-100):pos+200])
-        idx = pos + 1
-    return jsonify({
-        "html_length": len(html),
-        "term": term,
-        "occurrences": len(re.findall(re.escape(term), html)),
-        "snippets": snippets,
-    })
-
-
-@app.route("/debug-planning")
-def debug_planning():
-    date_str = request.args.get("date", "19/03/2026")
-    session, login_resp, connected = login()
-
-    # D'abord essayer depuis la réponse du login (planning du jour)
-    slots = parse_slots(login_resp.text)
-
-    # Si pas de slots ou date différente, appeler get_planning
-    today = datetime.now().strftime("%d/%m/%Y")
-    if not slots or date_str != today:
-        resp = get_planning(session, date_str)
-        slots = parse_slots(resp.text)
-        planning_html = resp.text
-    else:
-        planning_html = login_resp.text
-
+    slots = parse_slots(html)
+    # Debug: chercher tous les onclick avec IDOBJ
+    all_onclick = re.findall(r"IDOBJ\.value='([^']+)'", html)
     return jsonify({
         "connected": connected,
-        "planning_length": len(planning_html),
+        "planning_length": len(html),
         "slots_found": len(slots),
         "slots": slots[:10],
-        "planning_html": planning_html[:3000],
+        "all_idobj_found": all_onclick[:20],
     })
 
 
@@ -299,16 +258,14 @@ def creneaux():
     date_str = request.args.get("date")
     if not date_str:
         return jsonify({"error": "Parametre 'date' manquant"}), 400
-
     session, login_resp, _ = login()
     today = datetime.now().strftime("%d/%m/%Y")
-
     if date_str == today:
-        slots = parse_slots(login_resp.text)
+        html = login_resp.text
     else:
-        resp = get_planning(session, date_str)
-        slots = parse_slots(resp.text)
-
+        resp = get_planning(session, login_resp, date_str)
+        html = resp.text
+    slots = parse_slots(html)
     return jsonify({"date": date_str, "creneaux": slots})
 
 
@@ -317,21 +274,26 @@ def reserver():
     data = request.json
     idobj = data.get("idobj")
     idcrt = data.get("idcrt", "2")
-    pw = data.get("pw", "14")
+    pw = data.get("pw", "24")
+    date_str = data.get("date", datetime.now().strftime("%d/%m/%Y"))
     if not idobj:
         return jsonify({"error": "idobj manquant"}), 400
 
     session, login_resp, _ = login()
 
-    # Extraire idpge du planning
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', login_resp.text)
-    planning_idpge = m.group(1) if m else "210-00000000000000"
+    # Si date différente d'aujourd'hui, naviguer vers la bonne date
+    today = datetime.now().strftime("%d/%m/%Y")
+    if date_str != today:
+        planning_resp = get_planning(session, login_resp, date_str)
+        ref_resp = planning_resp
+    else:
+        ref_resp = login_resp
 
     # Ouvrir la fiche de réservation
-    fiche_resp = reserve_slot(session, idobj, idcrt, pw, planning_idpge)
+    fiche_resp = open_reservation_form(session, ref_resp, idobj, idcrt, pw)
 
     # Sélectionner partenaire et valider
-    confirm_resp = select_partner_and_validate(session, fiche_resp.text)
+    confirm_resp = select_partner_and_validate(session, fiche_resp)
 
     soup = BeautifulSoup(confirm_resp.text, "lxml")
     erreur = soup.find(class_="erreur")
