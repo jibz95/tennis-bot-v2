@@ -310,29 +310,34 @@ def debug_js():
         resp = get_planning(session, login_resp, date_str)
         html = resp.text
 
-    # Chercher idg_lset dans le HTML
+    # Compter les occurrences
     lset_count = html.count("idg_lset")
     pset_count = html.count("idg_pset")
-    
-    # Chercher les balises script
-    scripts = re.findall(r'<script[^>]*src=["\']([^"\']+)["\']', html)
-    
-    # Chercher idg_refresh_board
-    refresh_pos = html.find("idg_refresh_board")
-    refresh_snippet = html[max(0,refresh_pos-50):refresh_pos+200] if refresh_pos > -1 else "not found"
-    
-    # Essayer de charger idact=347
-    r347 = session.get(f"{PLANNING_URL}?idact=347")
-    lset_in_347 = r347.text.count("idg_lset")
-    
+
+    # Extraire la fonction idg_refresh_board complète
+    func_start = html.find("function idg_refresh_board")
+    if func_start > -1:
+        # Trouver la fin de la fonction (accolade fermante)
+        func_content = html[func_start:func_start+5000]
+    else:
+        func_content = "function not found"
+
+    # Chercher tous les scripts inline et leurs tailles
+    inline_scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
+    script_info = [{"len": len(s), "preview": s[:100]} for s in inline_scripts]
+
+    # Chercher les idg_lset avec guillemets simples aussi
+    lset_single = html.count("idg_lset('")
+    lset_double = html.count('idg_lset("')
+
     return jsonify({
         "connected": connected,
         "html_length": len(html),
-        "idg_lset_in_html": lset_count,
-        "idg_pset_in_html": pset_count,
-        "idg_refresh_board_snippet": refresh_snippet,
-        "script_srcs": scripts[:10],
-        "idg_lset_in_347": lset_in_347,
-        "r347_length": len(r347.text),
-        "r347_snippet": r347.text[:500],
+        "idg_lset_total": lset_count,
+        "idg_lset_single_quotes": lset_single,
+        "idg_lset_double_quotes": lset_double,
+        "idg_pset_total": pset_count,
+        "func_refresh_board": func_content[:3000],
+        "inline_scripts_count": len(inline_scripts),
+        "inline_scripts_info": script_info[:5],
     })
