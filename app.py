@@ -330,14 +330,27 @@ def debug_js():
     lset_single = html.count("idg_lset('")
     lset_double = html.count('idg_lset("')
 
+    # Extraire le gros script inline (61KB)
+    big_script = ""
+    for s in inline_scripts:
+        if len(s) > 10000:
+            big_script = s
+            break
+
+    # Chercher idg_lset et idg_pset dans ce script
+    lset_in_big = big_script.count("idg_lset")
+    pset_in_big = big_script.count("idg_pset")
+
+    # Trouver idg_refresh_board dans ce script
+    func_pos = big_script.find("idg_refresh_board")
+    func_snippet = big_script[max(0,func_pos-20):func_pos+500] if func_pos > -1 else "not found"
+
     return jsonify({
         "connected": connected,
         "html_length": len(html),
-        "idg_lset_total": lset_count,
-        "idg_lset_single_quotes": lset_single,
-        "idg_lset_double_quotes": lset_double,
-        "idg_pset_total": pset_count,
-        "func_refresh_board": func_content[:3000],
-        "inline_scripts_count": len(inline_scripts),
-        "inline_scripts_info": script_info[:5],
+        "big_script_len": len(big_script),
+        "idg_lset_in_big_script": lset_in_big,
+        "idg_pset_in_big_script": pset_in_big,
+        "func_refresh_board_snippet": func_snippet,
+        "big_script_start": big_script[:500],
     })
