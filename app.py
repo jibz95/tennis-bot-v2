@@ -225,6 +225,32 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/debug-search")
+def debug_search():
+    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
+    term = request.args.get("term", "idg_lset")
+    session, login_resp, connected = login()
+    today = datetime.now().strftime("%d/%m/%Y")
+    if date_str == today:
+        html = login_resp.text
+    else:
+        resp = get_planning(session, login_resp, date_str)
+        html = resp.text
+    snippets = []
+    idx = 0
+    while len(snippets) < 3:
+        pos = html.find(term, idx)
+        if pos == -1: break
+        snippets.append(html[max(0,pos-50):pos+300])
+        idx = pos + 1
+    return jsonify({
+        "connected": connected,
+        "html_length": len(html),
+        "occurrences": html.count(term),
+        "snippets": snippets,
+    })
+
+
 @app.route("/creneaux")
 def creneaux():
     date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
@@ -271,3 +297,42 @@ def reserver():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
+
+@app.route("/debug-js")
+def debug_js():
+    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
+    session, login_resp, connected = login()
+    today = datetime.now().strftime("%d/%m/%Y")
+    if date_str == today:
+        html = login_resp.text
+    else:
+        resp = get_planning(session, login_resp, date_str)
+        html = resp.text
+
+    # Chercher idg_lset dans le HTML
+    lset_count = html.count("idg_lset")
+    pset_count = html.count("idg_pset")
+    
+    # Chercher les balises script
+    scripts = re.findall(r'<script[^>]*src=["\']([^"\']+)["\']', html)
+    
+    # Chercher idg_refresh_board
+    refresh_pos = html.find("idg_refresh_board")
+    refresh_snippet = html[max(0,refresh_pos-50):refresh_pos+200] if refresh_pos > -1 else "not found"
+    
+    # Essayer de charger idact=347
+    r347 = session.get(f"{PLANNING_URL}?idact=347")
+    lset_in_347 = r347.text.count("idg_lset")
+    
+    return jsonify({
+        "connected": connected,
+        "html_length": len(html),
+        "idg_lset_in_html": lset_count,
+        "idg_pset_in_html": pset_count,
+        "idg_refresh_board_snippet": refresh_snippet,
+        "script_srcs": scripts[:10],
+        "idg_lset_in_347": lset_in_347,
+        "r347_length": len(r347.text),
+        "r347_snippet": r347.text[:500],
+    })
