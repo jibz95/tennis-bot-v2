@@ -19,57 +19,48 @@ def get_md5(s):
     return hashlib.md5(s.upper().encode()).hexdigest()
 
 
-def get_form_fields_from_js(html):
-    field_login = None
-    field_password = None
-    field_md5 = None
-    idpge_val = None
-
-    login_match = re.search(
-        r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.focus\(\)',
-        html
-    )
-    if login_match:
-        field_login = login_match.group(1).strip()
-
-    pwd_match = re.search(
-        r'var pwd = document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.',
-        html
-    )
-    if pwd_match:
-        field_password = pwd_match.group(1).strip()
-
-    md5_match = re.search(
-        r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.\s*\n\s*value\s*=\s*md5',
-        html
-    )
-    if md5_match:
-        field_md5 = md5_match.group(1).strip()
-
-    idpge_match = re.search(r'name="idpge"\s+value="([^"]+)"', html)
-    if idpge_match:
-        idpge_val = idpge_match.group(1)
-
-    return field_login, field_password, field_md5, idpge_val
-
-
-def login():
+def make_session(phpsessid=None):
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.premier-service.fr",
+        "Referer": BASE_URL,
     })
+    if phpsessid:
+        session.cookies.set("PHPSESSID", phpsessid, domain="www.premier-service.fr")
+    return session
 
-    # Étape 1 : simuler le POST automatique de adsltennis.fr vers premier-service.fr
-    # (ce que fait idgfrm.submit() en JS)
-    step1 = session.post(BASE_URL, data={
-        "club": CLUB_ID,
-        "idact": "101",
-    })
 
-    # Étape 2 : extraire les champs dynamiques du vrai formulaire de login
-    fl, fp, fm, idpge_val = get_form_fields_from_js(step1.text)
+def login_with_cookie(phpsessid):
+    """Utilise un PHPSESSID existant."""
+    session = make_session(phpsessid)
+    # Vérifier que la session est valide
+    resp = session.post(BASE_URL, data={"idact": "345", "idses": "S0"})
+    connected = "fiche_identification" not in resp.text and "session" not in resp.text.lower()[:500]
+    return session, connected, resp
+
+
+def login_fresh():
+    """Login complet depuis zéro via le flow adsltennis -> premier-service."""
+    session = make_session()
+
+    # Étape 1 : GET adsltennis pour obtenir PHPSESSID initial
+    r0 = session.get(
+        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
+        allow_redirects=False
+    )
+
+    # Étape 2 : suivre la redirection manuellement vers premier-service
+    location = r0.headers.get("Location", "")
+    if location:
+        r1 = session.get(location, allow_redirects=True)
+    else:
+        r1 = session.post(BASE_URL, data={"club": CLUB_ID, "idact": "101"})
+
+    # Étape 3 : extraire les champs dynamiques du formulaire
+    html = r1.text
+    fl, fp, fm, idpge_val = extract_fields(html)
 
     md5 = get_md5(PASSWORD + LOGIN)
 
@@ -85,28 +76,45 @@ def login():
         "userid": "",
         "userkey": "",
     }
-
-    if fl:
-        payload[fl] = LOGIN
-    if fp:
-        payload[fp] = ""
-    if fm:
-        payload[fm] = md5
-
-    debug = {
-        "field_login": fl, "field_password": fp,
-        "field_md5": fm, "idpge_val": idpge_val,
-        "md5": md5, "step1_url": step1.url,
-        "step1_length": len(step1.text),
-    }
+    if fl: payload[fl] = LOGIN
+    if fp: payload[fp] = ""
+    if fm: payload[fm] = md5
 
     resp = session.post(BASE_URL, data=payload)
-    return session, resp, debug
+    connected = "fiche_identification" not in resp.text
+
+    debug = {
+        "field_login": fl, "field_md5": fm,
+        "idpge_val": idpge_val, "md5": md5,
+        "r0_status": r0.status_code,
+        "r0_location": location,
+        "r1_url": r1.url,
+        "r1_length": len(html),
+        "cookies": dict(session.cookies),
+    }
+    return session, connected, resp, debug
+
+
+def extract_fields(html):
+    fl = fp = fm = idpge_val = None
+
+    m = re.search(r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.focus\(\)', html)
+    if m: fl = m.group(1).strip()
+
+    m = re.search(r'var pwd = document\.forms\[0\]\.\s*(\w+)\s*\n', html)
+    if m: fp = m.group(1).strip()
+
+    m = re.search(r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.\s*\n\s*value\s*=\s*md5', html)
+    if m: fm = m.group(1).strip()
+
+    m = re.search(r'name="idpge"\s+value="([^"]+)"', html)
+    if m: idpge_val = m.group(1)
+
+    return fl, fp, fm, idpge_val
 
 
 def get_planning(session, date_str):
-    payload = {"idact": "345", "ladate": date_str, "idses": "S0"}
-    return session.post(BASE_URL, data=payload)
+    return session.post(BASE_URL, data={"idact": "345", "ladate": date_str, "idses": "S0"})
 
 
 def parse_slots(html):
@@ -117,8 +125,7 @@ def parse_slots(html):
         if "330" in onclick:
             label = tag.get_text(strip=True)
             m = re.search(r"idpge['\"]?\s*[:=]\s*['\"]?([^'\"&,\s;]+)", onclick)
-            idpge = m.group(1) if m else ""
-            slots.append({"label": label, "idpge": idpge, "onclick_raw": onclick[:300]})
+            slots.append({"label": label, "idpge": m.group(1) if m else "", "onclick_raw": onclick[:300]})
     return slots
 
 
@@ -142,65 +149,65 @@ def health():
 
 @app.route("/debug-login")
 def debug_login():
-    session, resp, debug = login()
-    connected = "fiche_identification" not in resp.text
-    return jsonify({
-        "connected": connected,
-        "debug": debug,
-        "html_preview": resp.text[:3000],
-    })
-
-
-@app.route("/debug-init")
-def debug_init():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Content-Type": "application/x-www-form-urlencoded",
-    })
-    step1 = session.post(BASE_URL, data={"club": CLUB_ID, "idact": "101"})
-    html = step1.text
-    idx = html.find("fsmd5")
-    snippet = html[max(0, idx-300):idx+600] if idx > -1 else "fsmd5 not found"
-    return jsonify({
-        "url": step1.url,
-        "html_length": len(html),
-        "fsmd5_snippet": snippet,
-        "form_snippet": html[html.find("<form"):html.find("<form")+2000] if "<form" in html else "no form",
-    })
+    phpsessid = request.args.get("phpsessid")
+    if phpsessid:
+        session, connected, resp = login_with_cookie(phpsessid)
+        return jsonify({"method": "cookie", "connected": connected, "html_preview": resp.text[:1000]})
+    else:
+        session, connected, resp, debug = login_fresh()
+        return jsonify({"method": "fresh", "connected": connected, "debug": debug, "html_preview": resp.text[:1000]})
 
 
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "20/03/2026")
-    session, login_resp, debug = login()
+    phpsessid = request.args.get("phpsessid")
+
+    if phpsessid:
+        session = make_session(phpsessid)
+    else:
+        session, connected, _, debug = login_fresh()
+
     resp = get_planning(session, date_str)
+    slots = parse_slots(resp.text)
     return jsonify({
-        "debug": debug,
-        "connected": "fiche_identification" not in login_resp.text,
         "planning_length": len(resp.text),
-        "planning_html": resp.text[:8000],
+        "slots_found": len(slots),
+        "slots": slots[:5],
+        "planning_html": resp.text[:5000],
     })
 
 
 @app.route("/creneaux")
 def creneaux():
     date_str = request.args.get("date")
+    phpsessid = request.args.get("phpsessid")
     if not date_str:
         return jsonify({"error": "Parametre 'date' manquant"}), 400
-    session, _, _ = login()
+
+    if phpsessid:
+        session = make_session(phpsessid)
+    else:
+        session, _, _, _ = login_fresh()
+
     resp = get_planning(session, date_str)
     slots = parse_slots(resp.text)
-    return jsonify({"date": date_str, "creneaux": slots, "html_length": len(resp.text)})
+    return jsonify({"date": date_str, "creneaux": slots})
 
 
 @app.route("/reserver", methods=["POST"])
 def reserver():
     data = request.json
     idpge = data.get("idpge")
+    phpsessid = data.get("phpsessid")
     if not idpge:
         return jsonify({"error": "idpge manquant"}), 400
-    session, _, _ = login()
+
+    if phpsessid:
+        session = make_session(phpsessid)
+    else:
+        session, _, _, _ = login_fresh()
+
     resp = validate_reservation(session, idpge)
     soup = BeautifulSoup(resp.text, "lxml")
     erreur = soup.find(class_="erreur")
