@@ -14,7 +14,12 @@ PASSWORD = os.environ.get("TENNIS_PASSWORD", "")
 PARTNER_VALUE = "-100"
 PLANNING_URL = "https://www.premier-service.fr/5.11.04/ics.php"
 JOURS_FR = {0:"Lundi",1:"Mardi",2:"Mercredi",3:"Jeudi",4:"Vendredi",5:"Samedi",6:"Dimanche"}
-COURT_NAMES = {"1":"1TB","2":"2TB","3":"3TB","4":"4TB","5":"5TB","6":"6TB","7":"7DUR","8":"8DUR"}
+
+# Noms des courts
+COURT_NAMES = {
+    "1": "Court 1TB", "2": "Court 2TB", "3": "Court 3TB", "4": "Court 4TB",
+    "5": "Court 5TB", "6": "Court 6TB", "7": "Court 7DUR", "8": "Court 8DUR",
+}
 
 
 def get_md5(s):
@@ -58,8 +63,12 @@ def extract_login_fields(html):
 
 def login():
     session = make_session()
-    r0 = session.get(f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}", allow_redirects=True)
-    r1 = session.post(PLANNING_URL, data={"club": CLUB_ID, "idact": "101"}, headers={"Referer": r0.url})
+    r0 = session.get(
+        f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}",
+        allow_redirects=True
+    )
+    r1 = session.post(PLANNING_URL, data={"club": CLUB_ID, "idact": "101"},
+                      headers={"Referer": r0.url})
     html = r1.text
     fl, fp, fm, idpge_val, action_url = extract_login_fields(html)
     md5 = get_md5(PASSWORD + LOGIN)
@@ -97,8 +106,7 @@ def get_planning(session, login_resp, date_str):
     planning_idpge = get_planning_idpge(login_resp.text)
     date_fr = format_date_fr(date_str)
     payload = {
-        "idact": "336",
-        "idpge": planning_idpge,
+        "idact": "336", "idpge": planning_idpge,
         "IDOBJ": "", "idses": "S0", "idcrt": "",
         "idpro": "", "idpar": "",
         "pw": "24", "dj": "2",
@@ -117,72 +125,75 @@ def get_planning(session, login_resp, date_str):
 
 def parse_slots(html):
     """
-    Les créneaux libres ont la classe CSS 'resa_libre' sur les <td>.
-    On extrait leur onclick et leurs attributs pour récupérer IDOBJ, idcrt, pw.
+    Les créneaux libres sont des <p> avec :
+    - id format: HEURE_0_COURT (ex: 9_0_4 = 9h court 4)
+    - ondblclick="idg_take($(this).attr('id'))"
+    - style contenant var(--resa-libre)
+    On garde uniquement les heures pleines (pas les demi-heures _30_).
     """
     soup = BeautifulSoup(html, "lxml")
     slots = []
     seen = set()
 
-    # Chercher tous les éléments avec classe contenant "libre"
-    for tag in soup.find_all(class_=re.compile(r'libre', re.I)):
-        onclick = tag.get("onclick", "")
-        text = tag.get_text(strip=True)
+    for p in soup.find_all("p"):
+        pid = p.get("id", "")
+        style = p.get("style", "")
+        ondblclick = p.get("ondblclick", "")
 
-        # Extraire IDOBJ depuis onclick ou attributs data-*
-        idobj = ""
-        idobj_m = re.search(r"['\"]?IDOBJ['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
-        if not idobj_m:
-            idobj_m = re.search(r"IDOBJ[^'\"]*['\"]([^'\"]+)['\"]", onclick, re.I)
-        if idobj_m:
-            idobj = idobj_m.group(1)
-        if not idobj:
-            idobj = tag.get("data-idobj", "") or tag.get("id", "")
-
-        if not idobj or idobj in seen:
+        # Vérifier que c'est un créneau libre
+        if "--resa-libre" not in style:
             continue
-        seen.add(idobj)
+        if "idg_take" not in ondblclick:
+            continue
+        if not pid or pid in seen:
+            continue
 
-        # Extraire idcrt et pw
-        idcrt_m = re.search(r"['\"]?idcrt['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
-        pw_m = re.search(r"['\"]?pw['\"]?\s*,\s*['\"]([^'\"]+)['\"]", onclick, re.I)
-        idcrt = idcrt_m.group(1) if idcrt_m else tag.get("data-idcrt", "2")
-        pw = pw_m.group(1) if pw_m else tag.get("data-pw", "24")
+        # Format id: HEURE_0_COURT ou HEURE_30_COURT
+        parts = pid.split("_")
+        if len(parts) < 3:
+            continue
 
-        # Décoder IDOBJ pour extraire court et heure
-        parts = idobj.split("_")
-        court_num = parts[2] if len(parts) > 2 else "?"
-        heure_num = parts[0] if parts else ""
-        heure = f"{heure_num}h" if heure_num.isdigit() else (text if text else "?")
+        heure_num = parts[0]
+        minutes = parts[1]
+        court = parts[2]
+
+        # Garder uniquement les heures pleines (minutes = 0)
+        if minutes != "0":
+            continue
+
+        seen.add(pid)
+
+        heure = f"{heure_num}h"
+        court_label = COURT_NAMES.get(court, f"Court {court}")
 
         slots.append({
-            "label": f"Court {court_num} - {heure}",
+            "label": f"{court_label} - {heure}",
             "heure": heure,
-            "court": court_num,
-            "idobj": idobj,
-            "idcrt": idcrt,
-            "pw": pw,
-            "onclick_raw": onclick[:150],
+            "court": court,
+            "court_label": court_label,
+            "slot_id": pid,
         })
 
+    # Trier par heure puis par court
     slots.sort(key=lambda x: (
-        int(x["heure"].replace("h","")) if x["heure"].replace("h","").isdigit() else 99,
+        int(x["slot_id"].split("_")[0]),
         int(x["court"]) if x["court"].isdigit() else 99
     ))
     return slots
 
 
 def open_reservation_form(session, ref_html, slot_id, date_str):
-    """Ouvre la fiche de réservation pour un créneau (via idg_take)."""
+    """Ouvre la fiche de réservation via idg_take — soumet idact=336 avec slot_id."""
     planning_idpge = get_planning_idpge(ref_html)
     date_fr = format_date_fr(date_str)
+    parts = slot_id.split("_")
+    idcrt = parts[2] if len(parts) > 2 else "2"
 
-    # idg_take soumet le formulaire avec idact=336 et l'id du créneau comme IDOBJ
     payload = {
         "idact": "336",
         "idpge": planning_idpge,
         "IDOBJ": slot_id,
-        "idses": "S0", "idcrt": slot_id.split("_")[2] if len(slot_id.split("_")) > 2 else "2",
+        "idses": "S0", "idcrt": idcrt,
         "idpro": "", "idpar": "",
         "pw": "24", "dj": "2",
         "userid": "", "usermd5": "", "club": "",
@@ -195,7 +206,8 @@ def open_reservation_form(session, ref_html, slot_id, date_str):
     return session.post(PLANNING_URL, data=payload)
 
 
-def select_partner_and_validate(session, fiche_html):
+def select_partner_and_validate(session, fiche_resp):
+    fiche_html = fiche_resp.text
     m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', fiche_html)
     if not m: m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', fiche_html)
     idpge = m.group(1) if m else ""
@@ -234,18 +246,28 @@ def debug_planning():
     else:
         resp = get_planning(session, login_resp, date_str)
         html = resp.text
+
     slots = parse_slots(html)
-    # Debug: compter les <p> avec prc_visible
+
+    # Debug: chercher quelques <p> avec resa-libre
     soup = BeautifulSoup(html, "lxml")
-    prc_visible = soup.find_all("p", class_=lambda c: c and "prc_visible" in " ".join(c))
-    resa_libre = [p for p in prc_visible if "--resa-libre" in p.get("style","")]
+    libre_samples = []
+    for p in soup.find_all("p"):
+        if "--resa-libre" in p.get("style", ""):
+            libre_samples.append({
+                "id": p.get("id",""),
+                "ondblclick": p.get("ondblclick","")[:100],
+                "classes": p.get("class",[]),
+            })
+            if len(libre_samples) >= 5:
+                break
+
     return jsonify({
         "connected": connected,
         "planning_length": len(html),
-        "prc_visible_count": len(prc_visible),
-        "resa_libre_count": len(resa_libre),
         "slots_found": len(slots),
-        "slots": slots,
+        "slots": slots[:10],
+        "libre_samples": libre_samples,
     })
 
 
@@ -282,7 +304,7 @@ def reserver():
         ref_html = login_resp.text
 
     fiche_resp = open_reservation_form(session, ref_html, slot_id, date_str)
-    confirm_resp = select_partner_and_validate(session, fiche_resp.text)
+    confirm_resp = select_partner_and_validate(session, fiche_resp)
 
     soup = BeautifulSoup(confirm_resp.text, "lxml")
     erreur = soup.find(class_="erreur")
