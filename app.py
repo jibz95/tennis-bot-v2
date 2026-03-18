@@ -19,56 +19,62 @@ def get_md5(s):
     return hashlib.md5(s.upper().encode()).hexdigest()
 
 
-def login():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://www.premier-service.fr",
-        "Referer": f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
-    })
-
-    # Étape 1 : charger la page de login pour récupérer les noms de champs dynamiques
-    init_resp = session.get(
-        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101"
-    )
-
-    # Étape 2 : parser les noms de champs depuis le HTML
-    soup = BeautifulSoup(init_resp.text, "lxml")
-    form = soup.find("form")
-
-    # Trouver le champ identifiant (input type=text visible)
+def get_form_fields(html):
+    """Extrait les noms de champs dynamiques depuis le HTML de la page de login."""
+    soup = BeautifulSoup(html, "lxml")
+    
     field_login = None
     field_password = None
     field_md5 = None
     field_idpge = None
-
-    if form:
-        for inp in form.find_all("input"):
-            name = inp.get("name", "")
-            itype = inp.get("type", "text")
-            if itype == "text" and name and name not in ["userid", "largeur_ecran", "hauteur_ecran"]:
-                field_login = name
-            elif itype == "password" and name:
-                field_password = name
-            elif itype == "hidden" and name and "pge" in name.lower():
-                field_idpge = name
-        # Le champ MD5 est le hidden sans valeur initiale qui n'est pas usermd5/idgfcmiid
-        for inp in form.find_all("input", {"type": "hidden"}):
-            name = inp.get("name", "")
-            val = inp.get("value", "")
-            if not val and name and name not in ["usermd5", "idgfcmiid", "userid", "userkey", "idact"]:
-                if name != field_idpge:
-                    field_md5 = name
-
-    # Récupérer idpge depuis la page
     idpge_val = ""
-    if field_idpge and form:
-        idpge_inp = form.find("input", {"name": field_idpge})
-        if idpge_inp:
-            idpge_val = idpge_inp.get("value", f"101-{CLUB_ID}")
 
-    # Calcul MD5 : (PASSWORD + LOGIN).toUpperCase()
+    form = soup.find("form")
+    if not form:
+        return None, None, None, None, ""
+
+    fixed_names = {"idact", "usermd5", "idgfcmiid", "largeur_ecran", "hauteur_ecran",
+                   "pingmax", "pingmin", "userid", "userkey", "idses", "b_i"}
+
+    for inp in form.find_all("input"):
+        name = inp.get("name", "")
+        itype = inp.get("type", "text")
+        val = inp.get("value", "")
+
+        if not name or name in fixed_names:
+            continue
+
+        if itype == "text":
+            field_login = name
+        elif itype == "password":
+            field_password = name
+        elif itype == "hidden":
+            if "pge" in name.lower() and val:
+                field_idpge = name
+                idpge_val = val
+            elif not val:
+                field_md5 = name
+
+    return field_login, field_password, field_md5, field_idpge, idpge_val
+
+
+def login():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://www.premier-service.fr",
+    })
+
+    # Charger la page de login — suivre les redirections pour arriver sur premier-service.fr
+    init_resp = session.get(
+        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
+        allow_redirects=True
+    )
+
+    # Parser les champs depuis la page finale (après redirections)
+    fl, fp, fm, fidpge, idpge_val = get_form_fields(init_resp.text)
+
     md5 = get_md5(PASSWORD + LOGIN)
 
     payload = {
@@ -84,32 +90,27 @@ def login():
         "userkey": "",
     }
 
-    if field_login:
-        payload[field_login] = LOGIN
-    if field_password:
-        payload[field_password] = ""
-    if field_md5:
-        payload[field_md5] = md5
+    if fl:
+        payload[fl] = LOGIN
+    if fp:
+        payload[fp] = ""
+    if fm:
+        payload[fm] = md5
+
+    debug = {
+        "field_login": fl, "field_password": fp,
+        "field_md5": fm, "field_idpge": fidpge,
+        "idpge_val": idpge_val, "md5": md5,
+        "init_url": init_resp.url,
+    }
 
     resp = session.post(BASE_URL, data=payload)
-    return session, resp, {
-        "field_login": field_login,
-        "field_password": field_password,
-        "field_md5": field_md5,
-        "field_idpge": field_idpge,
-        "idpge_val": idpge_val,
-        "md5": md5,
-    }
+    return session, resp, debug
 
 
 def get_planning(session, date_str):
-    payload = {
-        "idact": "345",
-        "ladate": date_str,
-        "idses": "S0",
-    }
-    resp = session.post(BASE_URL, data=payload)
-    return resp
+    payload = {"idact": "345", "ladate": date_str, "idses": "S0"}
+    return session.post(BASE_URL, data=payload)
 
 
 def parse_slots(html):
@@ -119,34 +120,23 @@ def parse_slots(html):
         onclick = tag.get("onclick", "")
         if "330" in onclick:
             label = tag.get_text(strip=True)
-            idpge_match = re.search(r"idpge['\"]?\s*[:=]\s*['\"]?([^'\"&,\s;]+)", onclick)
-            idpge = idpge_match.group(1) if idpge_match else ""
-            slots.append({
-                "label": label,
-                "idpge": idpge,
-                "onclick_raw": onclick[:300]
-            })
+            m = re.search(r"idpge['\"]?\s*[:=]\s*['\"]?([^'\"&,\s;]+)", onclick)
+            idpge = m.group(1) if m else ""
+            slots.append({"label": label, "idpge": idpge, "onclick_raw": onclick[:300]})
     return slots
 
 
 def validate_reservation(session, idpge):
-    payload_partner = {
-        "idact": "332",
-        "idpge": idpge,
-        "IDOBJ": "100",
-        "idpar": "100",
+    session.post(BASE_URL, data={
+        "idact": "332", "idpge": idpge,
+        "IDOBJ": "100", "idpar": "100",
         "CHAMP_TYPE_1": PARTNER_VALUE,
-        "idses": "S0",
-        "b_i": "0",
-    }
-    session.post(BASE_URL, data=payload_partner)
-    payload_validate = {
-        "idact": "366",
-        "idpge": idpge,
-        "idses": "S0",
-        "b_i": "0",
-    }
-    return session.post(BASE_URL, data=payload_validate)
+        "idses": "S0", "b_i": "0",
+    })
+    return session.post(BASE_URL, data={
+        "idact": "366", "idpge": idpge,
+        "idses": "S0", "b_i": "0",
+    })
 
 
 @app.route("/health")
@@ -157,11 +147,12 @@ def health():
 @app.route("/debug-login")
 def debug_login():
     session, resp, debug = login()
+    # Chercher si on est connecté (présence du planning ou d'un menu)
+    connected = "fiche_identification" not in resp.text
     return jsonify({
+        "connected": connected,
         "status_code": resp.status_code,
-        "url_finale": resp.url,
-        "cookies": dict(session.cookies),
-        "debug_fields": debug,
+        "debug": debug,
         "html_preview": resp.text[:2000],
     })
 
@@ -172,9 +163,8 @@ def debug_planning():
     session, login_resp, debug = login()
     resp = get_planning(session, date_str)
     return jsonify({
-        "debug_fields": debug,
-        "login_preview": login_resp.text[:300],
-        "planning_status": resp.status_code,
+        "debug": debug,
+        "connected": "fiche_identification" not in login_resp.text,
         "planning_length": len(resp.text),
         "planning_html": resp.text[:8000],
     })
@@ -188,11 +178,7 @@ def creneaux():
     session, _, _ = login()
     resp = get_planning(session, date_str)
     slots = parse_slots(resp.text)
-    return jsonify({
-        "date": date_str,
-        "creneaux": slots,
-        "html_length": len(resp.text)
-    })
+    return jsonify({"date": date_str, "creneaux": slots, "html_length": len(resp.text)})
 
 
 @app.route("/reserver", methods=["POST"])
