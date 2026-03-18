@@ -20,20 +20,11 @@ def get_md5(s):
 
 
 def get_form_fields_from_js(html):
-    """
-    Les noms de champs sont définis dans le JS sous la forme :
-    document.forms[0].NOMCHAMP.focus()
-    ou
-    this.form.NOMCHAMP.focus()
-    On les extrait depuis le JS inline.
-    """
     field_login = None
     field_password = None
     field_md5 = None
     idpge_val = None
 
-    # Chercher le champ identifiant : onfocus ou onfocus dans le JS
-    # Pattern: document.forms[0]. NOMCHAMP \n .focus()
     login_match = re.search(
         r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.focus\(\)',
         html
@@ -41,8 +32,6 @@ def get_form_fields_from_js(html):
     if login_match:
         field_login = login_match.group(1).strip()
 
-    # Chercher le champ password dans le JS de fsmd5()
-    # Pattern: var pwd = document.forms[0]. NOMCHAMP \n . value
     pwd_match = re.search(
         r'var pwd = document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.',
         html
@@ -50,7 +39,6 @@ def get_form_fields_from_js(html):
     if pwd_match:
         field_password = pwd_match.group(1).strip()
 
-    # Chercher le champ MD5 : document.forms[0]. NOMCHAMP \n . \n value = md5
     md5_match = re.search(
         r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.\s*\n\s*value\s*=\s*md5',
         html
@@ -58,11 +46,7 @@ def get_form_fields_from_js(html):
     if md5_match:
         field_md5 = md5_match.group(1).strip()
 
-    # Chercher idpge depuis le form HTML
-    idpge_match = re.search(
-        r'name="idpge"\s+value="([^"]+)"',
-        html
-    )
+    idpge_match = re.search(r'name="idpge"\s+value="([^"]+)"', html)
     if idpge_match:
         idpge_val = idpge_match.group(1)
 
@@ -77,13 +61,15 @@ def login():
         "Origin": "https://www.premier-service.fr",
     })
 
-    # Charger la page de login
-    init_resp = session.get(
-        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
-        allow_redirects=True
-    )
+    # Étape 1 : simuler le POST automatique de adsltennis.fr vers premier-service.fr
+    # (ce que fait idgfrm.submit() en JS)
+    step1 = session.post(BASE_URL, data={
+        "club": CLUB_ID,
+        "idact": "101",
+    })
 
-    fl, fp, fm, idpge_val = get_form_fields_from_js(init_resp.text)
+    # Étape 2 : extraire les champs dynamiques du vrai formulaire de login
+    fl, fp, fm, idpge_val = get_form_fields_from_js(step1.text)
 
     md5 = get_md5(PASSWORD + LOGIN)
 
@@ -110,8 +96,8 @@ def login():
     debug = {
         "field_login": fl, "field_password": fp,
         "field_md5": fm, "idpge_val": idpge_val,
-        "md5": md5, "init_url": init_resp.url,
-        "payload_keys": list(payload.keys()),
+        "md5": md5, "step1_url": step1.url,
+        "step1_length": len(step1.text),
     }
 
     resp = session.post(BASE_URL, data=payload)
@@ -161,30 +147,26 @@ def debug_login():
     return jsonify({
         "connected": connected,
         "debug": debug,
-        "html_preview": resp.text[:2000],
+        "html_preview": resp.text[:3000],
     })
 
 
 @app.route("/debug-init")
 def debug_init():
-    """Voir le HTML brut de la page de login pour debugger les regex."""
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
     })
-    resp = session.get(
-        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
-        allow_redirects=True
-    )
-    # Extraire juste la partie JS autour de fsmd5
-    html = resp.text
+    step1 = session.post(BASE_URL, data={"club": CLUB_ID, "idact": "101"})
+    html = step1.text
     idx = html.find("fsmd5")
-    snippet = html[max(0, idx-200):idx+500] if idx > -1 else "fsmd5 not found"
+    snippet = html[max(0, idx-300):idx+600] if idx > -1 else "fsmd5 not found"
     return jsonify({
-        "url": resp.url,
+        "url": step1.url,
         "html_length": len(html),
         "fsmd5_snippet": snippet,
-        "form_snippet": html[html.find("<form"):html.find("<form")+1000] if "<form" in html else "no form",
+        "form_snippet": html[html.find("<form"):html.find("<form")+2000] if "<form" in html else "no form",
     })
 
 
