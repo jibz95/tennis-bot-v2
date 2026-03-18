@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import requests
 from bs4 import BeautifulSoup
@@ -7,7 +8,6 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 BASE_URL = "https://www.premier-service.fr/5.11.04/ics.php"
-MOBILE_URL = "https://www.premier-service.fr/5.11.04/ics.php"
 CLUB_ID = "32920393"
 
 LOGIN = os.environ.get("TENNIS_LOGIN", "JECHAP")
@@ -25,23 +25,56 @@ def login():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": "https://www.premier-service.fr",
-        "Referer": "https://www.adsltennis.fr/_start/index.php?club=32920393&idact=101",
+        "Referer": f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
     })
 
-    # Charger la page de login pour obtenir un cookie de session valide
+    # Étape 1 : charger la page de login pour récupérer les noms de champs dynamiques
     init_resp = session.get(
-        "https://www.adsltennis.fr/_start/index.php",
-        params={"club": CLUB_ID, "idact": "101"}
+        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101"
     )
 
-    # Le MD5 est calculé comme : MD5((PASSWORD + LOGIN).toUpperCase())
+    # Étape 2 : parser les noms de champs depuis le HTML
+    soup = BeautifulSoup(init_resp.text, "lxml")
+    form = soup.find("form")
+
+    # Trouver le champ identifiant (input type=text visible)
+    field_login = None
+    field_password = None
+    field_md5 = None
+    field_idpge = None
+
+    if form:
+        for inp in form.find_all("input"):
+            name = inp.get("name", "")
+            itype = inp.get("type", "text")
+            if itype == "text" and name and name not in ["userid", "largeur_ecran", "hauteur_ecran"]:
+                field_login = name
+            elif itype == "password" and name:
+                field_password = name
+            elif itype == "hidden" and name and "pge" in name.lower():
+                field_idpge = name
+        # Le champ MD5 est le hidden sans valeur initiale qui n'est pas usermd5/idgfcmiid
+        for inp in form.find_all("input", {"type": "hidden"}):
+            name = inp.get("name", "")
+            val = inp.get("value", "")
+            if not val and name and name not in ["usermd5", "idgfcmiid", "userid", "userkey", "idact"]:
+                if name != field_idpge:
+                    field_md5 = name
+
+    # Récupérer idpge depuis la page
+    idpge_val = ""
+    if field_idpge and form:
+        idpge_inp = form.find("input", {"name": field_idpge})
+        if idpge_inp:
+            idpge_val = idpge_inp.get("value", f"101-{CLUB_ID}")
+
+    # Calcul MD5 : (PASSWORD + LOGIN).toUpperCase()
     md5 = get_md5(PASSWORD + LOGIN)
 
     payload = {
         "idact": "101",
-        "idpge": f"101-{CLUB_ID}",
+        "idpge": idpge_val or f"101-{CLUB_ID}",
         "usermd5": "",
-        "vesiaifeytketradmeus": md5,
         "idgfcmiid": "0",
         "largeur_ecran": "1536",
         "hauteur_ecran": "864",
@@ -49,12 +82,24 @@ def login():
         "pingmin": "18",
         "userid": "",
         "userkey": "",
-        "rpaaeddpyyiuhs": LOGIN,
-        "ryusakurjstoeenf": "",
     }
 
+    if field_login:
+        payload[field_login] = LOGIN
+    if field_password:
+        payload[field_password] = ""
+    if field_md5:
+        payload[field_md5] = md5
+
     resp = session.post(BASE_URL, data=payload)
-    return session, resp
+    return session, resp, {
+        "field_login": field_login,
+        "field_password": field_password,
+        "field_md5": field_md5,
+        "field_idpge": field_idpge,
+        "idpge_val": idpge_val,
+        "md5": md5,
+    }
 
 
 def get_planning(session, date_str):
@@ -68,7 +113,6 @@ def get_planning(session, date_str):
 
 
 def parse_slots(html):
-    import re
     soup = BeautifulSoup(html, "lxml")
     slots = []
     for tag in soup.find_all(onclick=True):
@@ -112,23 +156,24 @@ def health():
 
 @app.route("/debug-login")
 def debug_login():
-    session, resp = login()
+    session, resp, debug = login()
     return jsonify({
         "status_code": resp.status_code,
         "url_finale": resp.url,
         "cookies": dict(session.cookies),
-        "html_preview": resp.text[:3000],
+        "debug_fields": debug,
+        "html_preview": resp.text[:2000],
     })
 
 
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "20/03/2026")
-    session, login_resp = login()
+    session, login_resp, debug = login()
     resp = get_planning(session, date_str)
     return jsonify({
-        "login_url": login_resp.url,
-        "login_preview": login_resp.text[:500],
+        "debug_fields": debug,
+        "login_preview": login_resp.text[:300],
         "planning_status": resp.status_code,
         "planning_length": len(resp.text),
         "planning_html": resp.text[:8000],
@@ -140,7 +185,7 @@ def creneaux():
     date_str = request.args.get("date")
     if not date_str:
         return jsonify({"error": "Parametre 'date' manquant"}), 400
-    session, _ = login()
+    session, _, _ = login()
     resp = get_planning(session, date_str)
     slots = parse_slots(resp.text)
     return jsonify({
@@ -156,7 +201,7 @@ def reserver():
     idpge = data.get("idpge")
     if not idpge:
         return jsonify({"error": "idpge manquant"}), 400
-    session, _ = login()
+    session, _, _ = login()
     resp = validate_reservation(session, idpge)
     soup = BeautifulSoup(resp.text, "lxml")
     erreur = soup.find(class_="erreur")
