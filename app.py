@@ -1,6 +1,7 @@
 import os
 import re
 import hashlib
+import time
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
@@ -82,64 +83,52 @@ def format_date_fr(date_str):
         return date_str
 
 
-def get_planning(session, login_resp, date_str):
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d{3}-\d+)["\']', login_resp.text)
-    if not m: m = re.search(r'value=["\'](\d{3}-\d+)["\'][^>]+name=["\']idpge["\']', login_resp.text)
-    planning_idpge = m.group(1) if m else f"210-{CLUB_ID}"
+def get_planning_js(session, date_str):
+    """
+    Appel AJAX idact=328 qui retourne la fonction idg_refresh_board
+    avec toutes les données du planning pour la date donnée.
+    """
     date_fr = format_date_fr(date_str)
-    return session.post(PLANNING_URL, data={
-        "idact": "336", "idpge": planning_idpge,
-        "IDOBJ": "", "idses": "S0", "idcrt": "",
-        "idpro": "", "idpar": "", "pw": "24", "dj": "2",
-        "userid": "", "usermd5": "", "club": "",
-        "B_MOJJO": "0",
-        "LISTE_RESA_BOURSE_DATE_JEU": "",
-        "LISTE_RESA_BOURSE_HEURE_JEU": "",
-        "LISTE_RESA_BOURSE_COURT_JEU": "",
-        "CHAMP_SELECTEUR_JEU": "1",
-        "ID_TABLEAU": f"1|{CLUB_ID}|1",
+    ts = int(time.time() * 1000)
+    resp = session.get(PLANNING_URL, params={
+        "idact": "328",
+        "idses": "S0",
         "CHAMP_SELECTEUR_JOUR": date_fr,
-        "nc": "30",
+        "_": ts,
     })
+    return resp.text
 
 
-def parse_slots(html):
+def parse_slots(js_text):
     """
     Parse les créneaux libres depuis la fonction JS idg_refresh_board.
     
     Logique :
     - idg_lset("8_0_C","22_0_C",-1,"var(--resa-libre)") = court C libre de 8h à 22h
-    - idg_pset(Array("H_M_C",...)) = créneau H:M du court C occupé
-    - Créneaux libres = heures pleines dans le range lset MINUS les pset occupés
+    - idg_pset(Array("H_M_C",...)) = créneau H:M court C occupé
+    - Créneaux libres = heures pleines dans range lset MINUS les pset occupés
     """
     slots = []
 
-    # 1. Trouver tous les courts libres et leur range
-    # Pattern: idg_lset("8_0_C","22_0_C",-1,"var(--resa-libre)")
-    lset_pattern = re.compile(r'idg_lset\("(\d+)_0_(\d+)","(\d+)_0_\d+",-1,"var\(--resa-libre\)"\)')
+    # 1. Courts libres et leur range horaire
+    lset_pattern = re.compile(r'idg_lset\("(\d+)_0_(\w+)","(\d+)_0_\w+",-1,"var\(--resa-libre\)"\)')
     courts_libre = {}
-    for m in lset_pattern.finditer(html):
+    for m in lset_pattern.finditer(js_text):
         heure_debut = int(m.group(1))
         court = m.group(2)
         heure_fin = int(m.group(3))
         courts_libre[court] = (heure_debut, heure_fin)
 
-    # 2. Trouver tous les créneaux occupés
-    # Pattern: idg_pset(Array("H_M_C",...))
-    pset_pattern = re.compile(r'idg_pset\(Array\("(\d+)_(\d+)_(\d+)"')
+    # 2. Créneaux occupés (toutes minutes confondues -> on marque l'heure pleine)
+    pset_pattern = re.compile(r'idg_pset\(Array\("(\d+)_(\d+)_(\w+)"')
     occupied = set()
-    for m in pset_pattern.finditer(html):
+    for m in pset_pattern.finditer(js_text):
         heure = int(m.group(1))
-        minutes = int(m.group(2))
         court = m.group(3)
-        # On marque les heures pleines comme occupées
-        if minutes == 0:
-            occupied.add(f"{heure}_0_{court}")
-        else:
-            # Si demi-heure occupée, marquer l'heure pleine aussi
-            occupied.add(f"{heure}_0_{court}")
+        # Marquer l'heure pleine comme occupée
+        occupied.add(f"{heure}_0_{court}")
 
-    # 3. Créneaux libres = heures pleines dans range - occupés
+    # 3. Créneaux libres = range - occupés (heures pleines uniquement)
     seen = set()
     for court, (h_debut, h_fin) in courts_libre.items():
         for heure in range(h_debut, h_fin):
@@ -155,7 +144,6 @@ def parse_slots(html):
                     "slot_id": slot_id,
                 })
 
-    # Trier par heure puis court
     slots.sort(key=lambda x: (
         int(x["slot_id"].split("_")[0]),
         int(x["court"]) if x["court"].isdigit() else 99
@@ -163,18 +151,40 @@ def parse_slots(html):
     return slots
 
 
-def open_reservation_and_validate(session, ref_html, slot_id, date_str):
-    """Ouvre la fiche de réservation, sélectionne Aurelien et valide."""
-    # Extraire idpge du planning
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d{3}-\d+)["\']', ref_html)
-    if not m: m = re.search(r'value=["\'](\d{3}-\d+)["\'][^>]+name=["\']idpge["\']', ref_html)
-    planning_idpge = m.group(1) if m else f"210-{CLUB_ID}"
+def get_planning_idpge(html):
+    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d{3}-\d+)["\']', html)
+    if not m: m = re.search(r'value=["\'](\d{3}-\d+)["\'][^>]+name=["\']idpge["\']', html)
+    return m.group(1) if m else f"210-{CLUB_ID}"
 
+
+def navigate_to_date(session, login_resp, date_str):
+    """Navigue vers la bonne date via idact=336."""
+    planning_idpge = get_planning_idpge(login_resp.text)
+    date_fr = format_date_fr(date_str)
+    session.post(PLANNING_URL, data={
+        "idact": "336", "idpge": planning_idpge,
+        "IDOBJ": "", "idses": "S0", "idcrt": "",
+        "idpro": "", "idpar": "", "pw": "24", "dj": "2",
+        "userid": "", "usermd5": "", "club": "",
+        "B_MOJJO": "0",
+        "LISTE_RESA_BOURSE_DATE_JEU": "",
+        "LISTE_RESA_BOURSE_HEURE_JEU": "",
+        "LISTE_RESA_BOURSE_COURT_JEU": "",
+        "CHAMP_SELECTEUR_JEU": "1",
+        "ID_TABLEAU": f"1|{CLUB_ID}|1",
+        "CHAMP_SELECTEUR_JOUR": date_fr,
+        "nc": "30",
+    })
+
+
+def open_reservation_and_validate(session, login_resp, slot_id, date_str):
+    """Ouvre la fiche, sélectionne Aurelien LANGE et valide."""
+    planning_idpge = get_planning_idpge(login_resp.text)
     parts = slot_id.split("_")
     idcrt = parts[2] if len(parts) > 2 else "2"
     date_fr = format_date_fr(date_str)
 
-    # Étape 1 : ouvrir la fiche de réservation
+    # Étape 1 : naviguer vers la date et ouvrir le créneau
     fiche_resp = session.post(PLANNING_URL, data={
         "idact": "336", "idpge": planning_idpge,
         "IDOBJ": slot_id, "idses": "S0", "idcrt": idcrt,
@@ -187,15 +197,14 @@ def open_reservation_and_validate(session, ref_html, slot_id, date_str):
         "nc": "30",
     })
 
-    # Extraire idpge de la fiche
     fiche_html = fiche_resp.text
+    if "fiche_erreur" in fiche_html or "autorisations" in fiche_html:
+        return False, "Impossible d'ouvrir la fiche de réservation"
+
+    # Extraire idpge de la fiche
     m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', fiche_html)
     if not m: m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', fiche_html)
     fiche_idpge = m.group(1) if m else ""
-
-    # Vérifier qu'on a bien la fiche (pas une erreur)
-    if "fiche_erreur" in fiche_html or "autorisations" in fiche_html:
-        return False, "Impossible d'ouvrir la fiche de réservation"
 
     # Étape 2 : sélectionner Aurelien LANGE
     session.post(PLANNING_URL, data={
@@ -225,29 +234,19 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.route("/debug-search")
-def debug_search():
-    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
-    term = request.args.get("term", "idg_lset")
-    session, login_resp, connected = login()
-    today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        html = resp.text
-    snippets = []
-    idx = 0
-    while len(snippets) < 3:
-        pos = html.find(term, idx)
-        if pos == -1: break
-        snippets.append(html[max(0,pos-50):pos+300])
-        idx = pos + 1
+@app.route("/debug-328")
+def debug_328():
+    date_str = request.args.get("date", "20/03/2026")
+    session, _, connected = login()
+    js_text = get_planning_js(session, date_str)
+    lset_count = js_text.count("idg_lset")
+    pset_count = js_text.count("idg_pset")
     return jsonify({
         "connected": connected,
-        "html_length": len(html),
-        "occurrences": html.count(term),
-        "snippets": snippets,
+        "length": len(js_text),
+        "idg_lset_count": lset_count,
+        "idg_pset_count": pset_count,
+        "preview": js_text[:2000],
     })
 
 
@@ -258,15 +257,20 @@ def creneaux():
     if not connected:
         return jsonify({"error": "Echec de connexion"}), 401
 
+    # Naviguer vers la date si nécessaire
     today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        html = resp.text
+    if date_str != today:
+        navigate_to_date(session, login_resp, date_str)
 
-    slots = parse_slots(html)
-    return jsonify({"date": date_str, "creneaux": slots, "total": len(slots)})
+    # Récupérer les données via idact=328
+    js_text = get_planning_js(session, date_str)
+    slots = parse_slots(js_text)
+
+    return jsonify({
+        "date": date_str,
+        "creneaux": slots,
+        "total": len(slots)
+    })
 
 
 @app.route("/reserver", methods=["POST"])
@@ -282,13 +286,10 @@ def reserver():
         return jsonify({"error": "Echec de connexion"}), 401
 
     today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        ref_html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        ref_html = resp.text
+    if date_str != today:
+        navigate_to_date(session, login_resp, date_str)
 
-    success, message = open_reservation_and_validate(session, ref_html, slot_id, date_str)
+    success, message = open_reservation_and_validate(session, login_resp, slot_id, date_str)
     if success:
         return jsonify({"status": "ok", "message": message})
     return jsonify({"error": message}), 400
@@ -297,60 +298,3 @@ def reserver():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-@app.route("/debug-js")
-def debug_js():
-    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
-    session, login_resp, connected = login()
-    today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        html = resp.text
-
-    # Compter les occurrences
-    lset_count = html.count("idg_lset")
-    pset_count = html.count("idg_pset")
-
-    # Extraire la fonction idg_refresh_board complète
-    func_start = html.find("function idg_refresh_board")
-    if func_start > -1:
-        # Trouver la fin de la fonction (accolade fermante)
-        func_content = html[func_start:func_start+5000]
-    else:
-        func_content = "function not found"
-
-    # Chercher tous les scripts inline et leurs tailles
-    inline_scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL)
-    script_info = [{"len": len(s), "preview": s[:100]} for s in inline_scripts]
-
-    # Chercher les idg_lset avec guillemets simples aussi
-    lset_single = html.count("idg_lset('")
-    lset_double = html.count('idg_lset("')
-
-    # Extraire le gros script inline (61KB)
-    big_script = ""
-    for s in inline_scripts:
-        if len(s) > 10000:
-            big_script = s
-            break
-
-    # Chercher idg_lset et idg_pset dans ce script
-    lset_in_big = big_script.count("idg_lset")
-    pset_in_big = big_script.count("idg_pset")
-
-    # Trouver idg_refresh_board dans ce script
-    func_pos = big_script.find("idg_refresh_board")
-    func_snippet = big_script[max(0,func_pos-20):func_pos+500] if func_pos > -1 else "not found"
-
-    return jsonify({
-        "connected": connected,
-        "html_length": len(html),
-        "big_script_len": len(big_script),
-        "idg_lset_in_big_script": lset_in_big,
-        "idg_pset_in_big_script": pset_in_big,
-        "func_refresh_board_snippet": func_snippet,
-        "big_script_start": big_script[:500],
-    })
