@@ -1,156 +1,116 @@
 import os
 import re
-import hashlib
+import time
 from datetime import datetime
-import requests
-from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 
 app = Flask(__name__)
 
 CLUB_ID = "57920393"
 LOGIN = os.environ.get("TENNIS_LOGIN", "JECHAP")
 PASSWORD = os.environ.get("TENNIS_PASSWORD", "")
-PARTNER_VALUE = "-100"
-PLANNING_URL = "https://www.premier-service.fr/5.11.04/ics.php"
+PARTNER_NAME = os.environ.get("TENNIS_PARTNER", "Aurelien LANGE")
+PLANNING_URL = f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}"
+
 JOURS_FR = {0:"Lundi",1:"Mardi",2:"Mercredi",3:"Jeudi",4:"Vendredi",5:"Samedi",6:"Dimanche"}
 
-# Noms des courts
 COURT_NAMES = {
     "1": "Court 1TB", "2": "Court 2TB", "3": "Court 3TB", "4": "Court 4TB",
     "5": "Court 5TB", "6": "Court 6TB", "7": "Court 7DUR", "8": "Court 8DUR",
 }
 
 
-def get_md5(s):
-    return hashlib.md5(s.upper().encode()).hexdigest()
+def make_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+    service = Service(os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver"))
+    return webdriver.Chrome(service=service, options=options)
 
 
-def make_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://www.premier-service.fr",
-    })
-    return s
+def login(driver):
+    driver.get(PLANNING_URL)
+    wait = WebDriverWait(driver, 10)
+
+    # Attendre le formulaire de login
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='text']")))
+
+    # Remplir identifiant
+    inputs_text = driver.find_elements(By.CSS_SELECTOR, "input[type='text']")
+    inputs_pwd = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+
+    for inp in inputs_text:
+        if inp.is_displayed():
+            inp.clear()
+            inp.send_keys(LOGIN)
+            break
+
+    for inp in inputs_pwd:
+        if inp.is_displayed():
+            inp.clear()
+            inp.send_keys(PASSWORD)
+            break
+
+    # Cliquer sur Entrer
+    btns = driver.find_elements(By.CSS_SELECTOR, "button, input[type='submit']")
+    for btn in btns:
+        if btn.is_displayed() and ("entrer" in btn.text.lower() or "valider" in btn.text.lower() or "login" in btn.text.lower()):
+            btn.click()
+            break
+
+    # Attendre le planning
+    time.sleep(3)
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "p.prc_visible")))
+    return True
 
 
-def extract_login_fields(html):
-    fl = fp = fm = idpge_val = action_url = None
-    m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html, re.I)
-    if m: action_url = m.group(1)
-    for m in re.finditer(r'<input[^>]+type=["\']text["\'][^>]*>', html, re.I):
-        nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if nm and nm.group(1) not in ("userid",): fl = nm.group(1); break
-    for m in re.finditer(r'<input[^>]+type=["\']password["\'][^>]*>', html, re.I):
-        nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if nm and nm.group(1) not in ("userkey",): fp = nm.group(1); break
-    fixed = {"idact","usermd5","idgfcmiid","largeur_ecran","hauteur_ecran",
-             "pingmax","pingmin","userid","userkey","idses","b_i","club"}
-    for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]*>', html, re.I):
-        nm = re.search(r'name=["\'](\w+)["\']', m.group(0))
-        if not nm: continue
-        name = nm.group(1)
-        vm = re.search(r'value=["\']([^"\']*)["\']', m.group(0))
-        val = vm.group(1) if vm else ""
-        if name not in fixed and not val: fm = name; break
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', html, re.I)
-    if not m: m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', html, re.I)
-    if m: idpge_val = m.group(1)
-    return fl, fp, fm, idpge_val, action_url
+def navigate_to_date(driver, date_str):
+    """Navigue vers une date en cliquant sur les flèches du planning."""
+    today = datetime.now().strftime("%d/%m/%Y")
+    if date_str == today:
+        return
+
+    target = datetime.strptime(date_str, "%d/%m/%Y")
+    current = datetime.now()
+    delta = (target - current).days
+
+    wait = WebDriverWait(driver, 10)
+    for _ in range(abs(delta)):
+        if delta > 0:
+            # Cliquer sur >> (suivant)
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(),'>>') or contains(@class,'suivant')]")))
+        else:
+            # Cliquer sur << (précédent)
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(),'<<') or contains(@class,'precedent')]")))
+        btn.click()
+        time.sleep(1)
 
 
-def login():
-    session = make_session()
-    r0 = session.get(
-        f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}",
-        allow_redirects=True
-    )
-    r1 = session.post(PLANNING_URL, data={"club": CLUB_ID, "idact": "101"},
-                      headers={"Referer": r0.url})
-    html = r1.text
-    fl, fp, fm, idpge_val, action_url = extract_login_fields(html)
-    md5 = get_md5(PASSWORD + LOGIN)
-    post_url = (action_url or PLANNING_URL).replace("/_start/../5.11.04/", "/5.11.04/").replace("?", "")
-    payload = {
-        "idact": "101", "idpge": idpge_val or f"101-{CLUB_ID}",
-        "usermd5": "", "idgfcmiid": "0",
-        "largeur_ecran": "1536", "hauteur_ecran": "864",
-        "pingmax": "401", "pingmin": "18", "userid": "", "userkey": "",
-    }
-    if fl: payload[fl] = LOGIN
-    if fp: payload[fp] = ""
-    if fm: payload[fm] = md5
-    session.headers["Referer"] = r1.url
-    resp = session.post(post_url, data=payload)
-    connected = "fiche_identification" not in resp.text and len(resp.text) > 5000
-    return session, resp, connected
+def get_slots(driver):
+    """Récupère les créneaux libres depuis le planning."""
+    wait = WebDriverWait(driver, 10)
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "p.prc_visible")))
 
-
-def format_date_fr(date_str):
-    try:
-        dt = datetime.strptime(date_str, "%d/%m/%Y")
-        return f"{date_str} {JOURS_FR[dt.weekday()]}"
-    except:
-        return date_str
-
-
-def get_planning_idpge(html):
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\'](\d{3}-\d+)["\']', html)
-    if not m: m = re.search(r'value=["\'](\d{3}-\d+)["\'][^>]+name=["\']idpge["\']', html)
-    return m.group(1) if m else f"210-{CLUB_ID}"
-
-
-def get_planning(session, login_resp, date_str):
-    planning_idpge = get_planning_idpge(login_resp.text)
-    date_fr = format_date_fr(date_str)
-    payload = {
-        "idact": "336", "idpge": planning_idpge,
-        "IDOBJ": "", "idses": "S0", "idcrt": "",
-        "idpro": "", "idpar": "",
-        "pw": "24", "dj": "2",
-        "userid": "", "usermd5": "", "club": "",
-        "B_MOJJO": "0",
-        "LISTE_RESA_BOURSE_DATE_JEU": "",
-        "LISTE_RESA_BOURSE_HEURE_JEU": "",
-        "LISTE_RESA_BOURSE_COURT_JEU": "",
-        "CHAMP_SELECTEUR_JEU": "1",
-        "ID_TABLEAU": f"1|{CLUB_ID}|1",
-        "CHAMP_SELECTEUR_JOUR": date_fr,
-        "nc": "30",
-    }
-    return session.post(PLANNING_URL, data=payload)
-
-
-def parse_slots(html):
-    """
-    Les créneaux libres sont des <p> avec :
-    - id format: HEURE_0_COURT (ex: 9_0_4 = 9h court 4)
-    - ondblclick="idg_take($(this).attr('id'))"
-    - style contenant var(--resa-libre)
-    On garde uniquement les heures pleines (pas les demi-heures _30_).
-    """
-    soup = BeautifulSoup(html, "lxml")
+    elements = driver.find_elements(By.CSS_SELECTOR, "p.prc_visible[ondblclick]")
     slots = []
     seen = set()
 
-    for p in soup.find_all("p"):
-        pid = p.get("id", "")
-        classes = " ".join(p.get("class", []))
-        ondblclick = p.get("ondblclick", "")
-
-        # Vérifier que c'est un créneau libre :
-        # classe prc_visible ET ondblclick contenant idg_take
-        if "prc_visible" not in classes:
-            continue
-        if "idg_take" not in ondblclick:
-            continue
-        if not pid or pid in seen:
+    for el in elements:
+        slot_id = el.get_attribute("id")
+        if not slot_id or slot_id in seen:
             continue
 
-        # Format id: HEURE_0_COURT ou HEURE_30_COURT
-        parts = pid.split("_")
+        parts = slot_id.split("_")
         if len(parts) < 3:
             continue
 
@@ -158,12 +118,11 @@ def parse_slots(html):
         minutes = parts[1]
         court = parts[2]
 
-        # Garder uniquement les heures pleines (minutes = 0)
+        # Heures pleines uniquement
         if minutes != "0":
             continue
 
-        seen.add(pid)
-
+        seen.add(slot_id)
         heure = f"{heure_num}h"
         court_label = COURT_NAMES.get(court, f"Court {court}")
 
@@ -172,10 +131,9 @@ def parse_slots(html):
             "heure": heure,
             "court": court,
             "court_label": court_label,
-            "slot_id": pid,
+            "slot_id": slot_id,
         })
 
-    # Trier par heure puis par court
     slots.sort(key=lambda x: (
         int(x["slot_id"].split("_")[0]),
         int(x["court"]) if x["court"].isdigit() else 99
@@ -183,47 +141,39 @@ def parse_slots(html):
     return slots
 
 
-def open_reservation_form(session, ref_html, slot_id, date_str):
-    """Ouvre la fiche de réservation via idg_take — soumet idact=336 avec slot_id."""
-    planning_idpge = get_planning_idpge(ref_html)
-    date_fr = format_date_fr(date_str)
-    parts = slot_id.split("_")
-    idcrt = parts[2] if len(parts) > 2 else "2"
+def reserve_slot(driver, slot_id):
+    """Clique sur un créneau et valide avec Aurelien LANGE."""
+    wait = WebDriverWait(driver, 10)
 
-    payload = {
-        "idact": "336",
-        "idpge": planning_idpge,
-        "IDOBJ": slot_id,
-        "idses": "S0", "idcrt": idcrt,
-        "idpro": "", "idpar": "",
-        "pw": "24", "dj": "2",
-        "userid": "", "usermd5": "", "club": "",
-        "B_MOJJO": "0",
-        "CHAMP_SELECTEUR_JEU": "1",
-        "ID_TABLEAU": f"1|{CLUB_ID}|1",
-        "CHAMP_SELECTEUR_JOUR": date_fr,
-        "nc": "30",
-    }
-    return session.post(PLANNING_URL, data=payload)
+    # Double-cliquer sur le créneau via JS
+    el = driver.find_element(By.ID, slot_id)
+    driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))", el)
+    time.sleep(2)
 
+    # Sélectionner le partenaire
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "select")))
+    selects = driver.find_elements(By.CSS_SELECTOR, "select")
+    for sel in selects:
+        options = sel.find_elements(By.TAG_NAME, "option")
+        for opt in options:
+            if PARTNER_NAME.lower() in opt.text.lower():
+                opt.click()
+                time.sleep(2)
+                break
 
-def select_partner_and_validate(session, fiche_resp):
-    fiche_html = fiche_resp.text
-    m = re.search(r'name=["\']idpge["\'][^>]+value=["\']([^"\']+)["\']', fiche_html)
-    if not m: m = re.search(r'value=["\']([^"\']+)["\'][^>]+name=["\']idpge["\']', fiche_html)
-    idpge = m.group(1) if m else ""
+    # Valider
+    btns = driver.find_elements(By.CSS_SELECTOR, "button")
+    for btn in btns:
+        if "valider" in btn.text.lower():
+            btn.click()
+            time.sleep(2)
+            break
 
-    session.post(PLANNING_URL, data={
-        "idact": "332", "idpge": idpge,
-        "IDOBJ": "100", "IDREF": "", "idtpa": "",
-        "idpar": "100", "rcout": "", "b_i": "0",
-        "idses": "S0", "CHAMP_TYPE_1": PARTNER_VALUE,
-    })
-    return session.post(PLANNING_URL, data={
-        "idact": "366", "idpge": idpge,
-        "IDOBJ": "", "IDREF": "", "idtpa": "",
-        "idpar": "", "rcout": "", "b_i": "0", "idses": "S0",
-    })
+    # Vérifier confirmation
+    page_text = driver.find_element(By.TAG_NAME, "body").text
+    if "erreur" in page_text.lower():
+        return False, page_text[:200]
+    return True, "Reservation confirmee"
 
 
 @app.route("/health")
@@ -231,62 +181,21 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.route("/debug-login")
-def debug_login():
-    session, resp, connected = login()
-    return jsonify({"connected": connected, "resp_len": len(resp.text)})
-
-
-@app.route("/debug-planning")
-def debug_planning():
-    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
-    session, login_resp, connected = login()
-    today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        html = resp.text
-
-    slots = parse_slots(html)
-
-    # Debug: chercher quelques <p> avec resa-libre
-    soup = BeautifulSoup(html, "lxml")
-    libre_samples = []
-    for p in soup.find_all("p"):
-        if "prc_visible" in " ".join(p.get("class", [])) and "idg_take" in p.get("ondblclick",""):
-            libre_samples.append({
-                "id": p.get("id",""),
-                "ondblclick": p.get("ondblclick","")[:100],
-                "classes": p.get("class",[]),
-                "style": p.get("style","")[:100],
-            })
-            if len(libre_samples) >= 5:
-                break
-
-    return jsonify({
-        "connected": connected,
-        "planning_length": len(html),
-        "slots_found": len(slots),
-        "slots": slots[:10],
-        "libre_samples": libre_samples,
-    })
-
-
 @app.route("/creneaux")
 def creneaux():
-    date_str = request.args.get("date")
-    if not date_str:
-        return jsonify({"error": "Parametre 'date' manquant"}), 400
-    session, login_resp, _ = login()
-    today = datetime.now().strftime("%d/%m/%Y")
-    if date_str == today:
-        html = login_resp.text
-    else:
-        resp = get_planning(session, login_resp, date_str)
-        html = resp.text
-    slots = parse_slots(html)
-    return jsonify({"date": date_str, "creneaux": slots})
+    date_str = request.args.get("date", datetime.now().strftime("%d/%m/%Y"))
+    driver = None
+    try:
+        driver = make_driver()
+        login(driver)
+        navigate_to_date(driver, date_str)
+        slots = get_slots(driver)
+        return jsonify({"date": date_str, "creneaux": slots})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if driver:
+            driver.quit()
 
 
 @app.route("/reserver", methods=["POST"])
@@ -297,24 +206,23 @@ def reserver():
     if not slot_id:
         return jsonify({"error": "slot_id manquant"}), 400
 
-    session, login_resp, _ = login()
-    today = datetime.now().strftime("%d/%m/%Y")
-    if date_str != today:
-        planning_resp = get_planning(session, login_resp, date_str)
-        ref_html = planning_resp.text
-    else:
-        ref_html = login_resp.text
-
-    fiche_resp = open_reservation_form(session, ref_html, slot_id, date_str)
-    confirm_resp = select_partner_and_validate(session, fiche_resp)
-
-    soup = BeautifulSoup(confirm_resp.text, "lxml")
-    erreur = soup.find(class_="erreur")
-    if erreur and erreur.get_text(strip=True):
-        return jsonify({"error": erreur.get_text(strip=True)})
-    return jsonify({"status": "ok", "message": "Reservation confirmee"})
+    driver = None
+    try:
+        driver = make_driver()
+        login(driver)
+        navigate_to_date(driver, date_str)
+        success, message = reserve_slot(driver, slot_id)
+        if success:
+            return jsonify({"status": "ok", "message": message})
+        else:
+            return jsonify({"error": message}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if driver:
+            driver.quit()
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
