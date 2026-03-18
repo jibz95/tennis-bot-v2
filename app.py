@@ -1,17 +1,20 @@
 import os
 import re
 import hashlib
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-CLUB_ID = "32920393"
+CLUB_ID = "57920393"
 LOGIN = os.environ.get("TENNIS_LOGIN", "JECHAP")
 PASSWORD = os.environ.get("TENNIS_PASSWORD", "")
 PARTNER_VALUE = "-100"  # Aurelien LANGE
 PLANNING_URL = "https://www.premier-service.fr/5.11.04/ics.php"
+
+JOURS_FR = {0:"Lundi",1:"Mardi",2:"Mercredi",3:"Jeudi",4:"Vendredi",5:"Samedi",6:"Dimanche"}
 
 
 def get_md5(s):
@@ -72,27 +75,23 @@ def extract_fields(html):
 def login():
     session = make_session()
 
-    # Étape 1 : GET adsltennis -> redirige vers premier-service/_start/index.php
-    # qui contient un form auto-soumis vers 5.11.04/ics.php
     r0 = session.get(
-        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
+        f"https://www.premier-service.fr/_start/index.php?club={CLUB_ID}",
         allow_redirects=True
     )
 
-    # Étape 2 : simuler la soumission JS du mini-form
-    # action="https://www.premier-service.fr/5.11.04/ics.php" avec club + idact
     r1 = session.post(PLANNING_URL, data={
         "club": CLUB_ID,
         "idact": "101",
     }, headers={"Referer": r0.url})
 
-    # Étape 3 : r1 contient maintenant le vrai formulaire de login
     html = r1.text
     fl, fp, fm, idpge_val, action_url = extract_fields(html)
 
     md5 = get_md5(PASSWORD + LOGIN)
-
     post_url = action_url if (action_url and action_url.startswith("http")) else PLANNING_URL
+    # Normaliser l'URL (/../)
+    post_url = post_url.replace("/_start/../5.11.04/", "/5.11.04/")
 
     payload = {
         "idact": "101",
@@ -111,31 +110,49 @@ def login():
     if fm: payload[fm] = md5
 
     session.headers["Referer"] = r1.url
-
     resp = session.post(post_url, data=payload)
     connected = ("fiche_identification" not in resp.text
                  and "fiche_erreur" not in resp.text
                  and len(resp.text) > 5000)
 
-    debug = {
-        "field_login": fl, "field_md5": fm,
-        "idpge_val": idpge_val, "post_url": post_url,
-        "md5": md5,
-        "r0_url": r0.url, "r0_len": len(r0.text),
-        "r1_url": r1.url, "r1_len": len(html),
-        "r1_has_form": "<form" in html,
-        "r1_form_snippet": html[html.find("<form"):html.find("<form")+300] if "<form" in html else "no form",
-        "cookies": dict(session.cookies),
-        "connected": connected,
-        "resp_len": len(resp.text),
-    }
-    return session, resp, debug
+    return session, resp, connected
+
+
+def format_date_fr(date_str):
+    """Convertit JJ/MM/AAAA en 'JJ/MM/AAAA Jour'."""
+    try:
+        dt = datetime.strptime(date_str, "%d/%m/%Y")
+        jour = JOURS_FR[dt.weekday()]
+        return f"{date_str} {jour}"
+    except:
+        return date_str
 
 
 def get_planning(session, date_str):
-    return session.post(PLANNING_URL, data={
-        "idact": "345", "ladate": date_str, "idses": "S0"
-    })
+    date_fr = format_date_fr(date_str)
+    payload = {
+        "idact": "336",
+        "idpge": "210-00000000000000",
+        "IDOBJ": "10_0_2",
+        "idses": "S0",
+        "idcrt": "2",
+        "idpro": "",
+        "idpar": "",
+        "pw": "14",
+        "dj": "2",
+        "userid": "",
+        "usermd5": "",
+        "club": "",
+        "B_MOJJO": "0",
+        "LISTE_RESA_BOURSE_DATE_JEU": "",
+        "LISTE_RESA_BOURSE_HEURE_JEU": "",
+        "LISTE_RESA_BOURSE_COURT_JEU": "",
+        "CHAMP_SELECTEUR_JEU": "1",
+        "ID_TABLEAU": f"1|{CLUB_ID}|1",
+        "CHAMP_SELECTEUR_JOUR": date_fr,
+        "nc": "30",
+    }
+    return session.post(PLANNING_URL, data=payload)
 
 
 def parse_slots(html):
@@ -170,22 +187,22 @@ def health():
 
 @app.route("/debug-login")
 def debug_login():
-    session, resp, debug = login()
+    session, resp, connected = login()
     return jsonify({
-        "connected": debug["connected"],
-        "debug": debug,
-        "html_preview": resp.text[:2000],
+        "connected": connected,
+        "resp_len": len(resp.text),
+        "html_preview": resp.text[:1000],
     })
 
 
 @app.route("/debug-planning")
 def debug_planning():
     date_str = request.args.get("date", "19/03/2026")
-    session, _, debug = login()
+    session, _, connected = login()
     resp = get_planning(session, date_str)
     slots = parse_slots(resp.text)
     return jsonify({
-        "connected": debug["connected"],
+        "connected": connected,
         "planning_length": len(resp.text),
         "slots_found": len(slots),
         "slots": slots[:10],
@@ -222,3 +239,21 @@ def reserver():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
+# Route temporaire pour voir le HTML après login
+@app.route("/debug-after-login")
+def debug_after_login():
+    session, resp, connected = login()
+    # Chercher idpge=210 dans le HTML
+    html = resp.text
+    m = re.search(r'idpge["\s]+value=["\']?(210-\d+)', html)
+    idpge_210 = m.group(1) if m else "not found"
+    # Chercher tous les idpge
+    all_idpge = re.findall(r'idpge[^"\']*["\']([^"\']+)["\']', html)
+    return jsonify({
+        "connected": connected,
+        "idpge_210": idpge_210,
+        "all_idpge": all_idpge[:10],
+        "html_snippet": html[html.find("210"):html.find("210")+200] if "210" in html else "not found",
+        "html_preview": html[:3000],
+    })
