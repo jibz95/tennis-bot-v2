@@ -19,43 +19,54 @@ def get_md5(s):
     return hashlib.md5(s.upper().encode()).hexdigest()
 
 
-def get_form_fields(html):
-    """Extrait les noms de champs dynamiques depuis le HTML de la page de login."""
-    soup = BeautifulSoup(html, "lxml")
-    
+def get_form_fields_from_js(html):
+    """
+    Les noms de champs sont définis dans le JS sous la forme :
+    document.forms[0].NOMCHAMP.focus()
+    ou
+    this.form.NOMCHAMP.focus()
+    On les extrait depuis le JS inline.
+    """
     field_login = None
     field_password = None
     field_md5 = None
-    field_idpge = None
-    idpge_val = ""
+    idpge_val = None
 
-    form = soup.find("form")
-    if not form:
-        return None, None, None, None, ""
+    # Chercher le champ identifiant : onfocus ou onfocus dans le JS
+    # Pattern: document.forms[0]. NOMCHAMP \n .focus()
+    login_match = re.search(
+        r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.focus\(\)',
+        html
+    )
+    if login_match:
+        field_login = login_match.group(1).strip()
 
-    fixed_names = {"idact", "usermd5", "idgfcmiid", "largeur_ecran", "hauteur_ecran",
-                   "pingmax", "pingmin", "userid", "userkey", "idses", "b_i"}
+    # Chercher le champ password dans le JS de fsmd5()
+    # Pattern: var pwd = document.forms[0]. NOMCHAMP \n . value
+    pwd_match = re.search(
+        r'var pwd = document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.',
+        html
+    )
+    if pwd_match:
+        field_password = pwd_match.group(1).strip()
 
-    for inp in form.find_all("input"):
-        name = inp.get("name", "")
-        itype = inp.get("type", "text")
-        val = inp.get("value", "")
+    # Chercher le champ MD5 : document.forms[0]. NOMCHAMP \n . \n value = md5
+    md5_match = re.search(
+        r'document\.forms\[0\]\.\s*(\w+)\s*\n\s*\.\s*\n\s*value\s*=\s*md5',
+        html
+    )
+    if md5_match:
+        field_md5 = md5_match.group(1).strip()
 
-        if not name or name in fixed_names:
-            continue
+    # Chercher idpge depuis le form HTML
+    idpge_match = re.search(
+        r'name="idpge"\s+value="([^"]+)"',
+        html
+    )
+    if idpge_match:
+        idpge_val = idpge_match.group(1)
 
-        if itype == "text":
-            field_login = name
-        elif itype == "password":
-            field_password = name
-        elif itype == "hidden":
-            if "pge" in name.lower() and val:
-                field_idpge = name
-                idpge_val = val
-            elif not val:
-                field_md5 = name
-
-    return field_login, field_password, field_md5, field_idpge, idpge_val
+    return field_login, field_password, field_md5, idpge_val
 
 
 def login():
@@ -66,14 +77,13 @@ def login():
         "Origin": "https://www.premier-service.fr",
     })
 
-    # Charger la page de login — suivre les redirections pour arriver sur premier-service.fr
+    # Charger la page de login
     init_resp = session.get(
         f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
         allow_redirects=True
     )
 
-    # Parser les champs depuis la page finale (après redirections)
-    fl, fp, fm, fidpge, idpge_val = get_form_fields(init_resp.text)
+    fl, fp, fm, idpge_val = get_form_fields_from_js(init_resp.text)
 
     md5 = get_md5(PASSWORD + LOGIN)
 
@@ -99,9 +109,9 @@ def login():
 
     debug = {
         "field_login": fl, "field_password": fp,
-        "field_md5": fm, "field_idpge": fidpge,
-        "idpge_val": idpge_val, "md5": md5,
-        "init_url": init_resp.url,
+        "field_md5": fm, "idpge_val": idpge_val,
+        "md5": md5, "init_url": init_resp.url,
+        "payload_keys": list(payload.keys()),
     }
 
     resp = session.post(BASE_URL, data=payload)
@@ -147,13 +157,34 @@ def health():
 @app.route("/debug-login")
 def debug_login():
     session, resp, debug = login()
-    # Chercher si on est connecté (présence du planning ou d'un menu)
     connected = "fiche_identification" not in resp.text
     return jsonify({
         "connected": connected,
-        "status_code": resp.status_code,
         "debug": debug,
         "html_preview": resp.text[:2000],
+    })
+
+
+@app.route("/debug-init")
+def debug_init():
+    """Voir le HTML brut de la page de login pour debugger les regex."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    })
+    resp = session.get(
+        f"https://www.adsltennis.fr/_start/index.php?club={CLUB_ID}&idact=101",
+        allow_redirects=True
+    )
+    # Extraire juste la partie JS autour de fsmd5
+    html = resp.text
+    idx = html.find("fsmd5")
+    snippet = html[max(0, idx-200):idx+500] if idx > -1 else "fsmd5 not found"
+    return jsonify({
+        "url": resp.url,
+        "html_length": len(html),
+        "fsmd5_snippet": snippet,
+        "form_snippet": html[html.find("<form"):html.find("<form")+1000] if "<form" in html else "no form",
     })
 
 
