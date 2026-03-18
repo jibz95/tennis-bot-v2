@@ -27,8 +27,8 @@ def make_browser(p):
 
 
 def do_login(page):
-    page.goto(PLANNING_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(3000)
+    page.goto(PLANNING_URL, wait_until="networkidle", timeout=30000)
+    page.wait_for_timeout(5000)
 
     # Chercher les champs visibles
     inputs_text = page.query_selector_all("input[type='text']")
@@ -178,20 +178,20 @@ def reserver():
                 browser.close()
                 return jsonify({"error": f"Creneau {slot_id} introuvable"}), 404
             el.dblclick()
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
             selects = page.query_selector_all("select:visible")
             for sel in selects:
                 options = sel.query_selector_all("option")
                 for opt in options:
                     if PARTNER_NAME.lower() in opt.inner_text().lower():
                         opt.click()
-                        page.wait_for_timeout(3000)
+                        page.wait_for_timeout(5000)
                         break
             btns = page.query_selector_all("button:visible")
             for btn in btns:
                 if "valider" in btn.inner_text().lower():
                     btn.click()
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(5000)
                     break
             body_text = page.query_selector("body").inner_text()
             browser.close()
