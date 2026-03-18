@@ -33,7 +33,7 @@ def make_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     service = Service(os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver"))
     return webdriver.Chrome(service=service, options=options)
 
